@@ -9,7 +9,7 @@ import (
 	"github.com/fluxplane/fluxplane-core/orchestration/pluginhost"
 
 	dex "github.com/fluxplane/fluxplane-dex"
-	"github.com/fluxplane/fluxplane-dex/fluxplaneplugin"
+	"github.com/fluxplane/fluxplane-plugin"
 )
 
 // fakeNative is a no-op pluginhost.Plugin used in NativePlugins fields so

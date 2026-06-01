@@ -1,4 +1,4 @@
-module github.com/fluxplane/fluxplane-dex/fluxplaneplugin
+module github.com/fluxplane/fluxplane-plugin
 
 go 1.26.1
 

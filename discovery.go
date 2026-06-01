@@ -11,7 +11,7 @@ import (
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 
 	dexcore "github.com/fluxplane/fluxplane-dex/core"
-	"github.com/fluxplane/fluxplane-dex/protocol"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 	"github.com/fluxplane/fluxplane-dex/runtime"
 )
 

@@ -12,7 +12,7 @@ import (
 
 	"github.com/fluxplane/fluxplane-core/core/resource"
 	dex "github.com/fluxplane/fluxplane-dex"
-	"github.com/fluxplane/fluxplane-dex/fluxplaneplugin"
+	"github.com/fluxplane/fluxplane-plugin"
 )
 
 // Sanity check on the real motivating case: a dex gitlab plugin produces

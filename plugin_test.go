@@ -13,7 +13,7 @@ import (
 	coredatasource "github.com/fluxplane/fluxplane-datasource"
 
 	dex "github.com/fluxplane/fluxplane-dex"
-	"github.com/fluxplane/fluxplane-dex/fluxplaneplugin"
+	"github.com/fluxplane/fluxplane-plugin"
 )
 
 func newEngine(t *testing.T) *dex.Engine {
@@ -197,7 +197,7 @@ func TestDatasourceProviderOpenUnknownReturnsError(t *testing.T) {
 }
 
 func TestDatasourceProviderListsIndexedRecords(t *testing.T) {
-	slackDir, err := filepath.Abs("../plugins/slack")
+	slackDir, err := filepath.Abs("../fluxplane-dex/plugins/slack")
 	if err != nil {
 		t.Fatalf("filepath.Abs: %v", err)
 	}
@@ -206,9 +206,9 @@ func TestDatasourceProviderListsIndexedRecords(t *testing.T) {
 		t.Fatalf("dex.New: %v", err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
-	if _, err := e.Runner().State.SaveIndexRecords("slack", "work", "slack.users", []json.RawMessage{
-		json.RawMessage(`{"entity":"slack.user","id":"U2","title":"Beta User","name":"beta"}`),
-		json.RawMessage(`{"entity":"slack.user","id":"U1","title":"Alpha User","name":"alpha"}`),
+	if _, err := e.Runner().State.SaveIndexRecords("slack", "work", "slack.messages", []json.RawMessage{
+		json.RawMessage(`{"entity":"slack.message","id":"M2","title":"Beta Message","text":"beta"}`),
+		json.RawMessage(`{"entity":"slack.message","id":"M1","title":"Alpha Message","text":"alpha"}`),
 	}); err != nil {
 		t.Fatalf("SaveIndexRecords: %v", err)
 	}
@@ -225,29 +225,29 @@ func TestDatasourceProviderListsIndexedRecords(t *testing.T) {
 		t.Fatalf("DatasourceProviders: %v", err)
 	}
 	accessor, err := providers[0].Open(context.Background(), coredatasource.Spec{
-		Name:     "slack.users",
+		Name:     "slack.messages",
 		Kind:     "slack",
-		Entities: []coredatasource.EntityType{"slack.user"},
+		Entities: []coredatasource.EntityType{"slack.message"},
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	entity := accessor.Entities()[0]
-	if !entity.Supports(coredatasource.EntityCapabilityList) {
-		t.Fatalf("entity capabilities = %#v, want list", entity.Capabilities)
+	if !entity.Supports(coredatasource.EntityCapabilitySearch) {
+		t.Fatalf("entity capabilities = %#v, want search", entity.Capabilities)
 	}
 	lister, ok := accessor.(coredatasource.Lister)
 	if !ok {
 		t.Fatalf("accessor does not implement Lister")
 	}
-	result, err := lister.List(context.Background(), coredatasource.ListRequest{Entity: "slack.user", Limit: 1})
+	result, err := lister.List(context.Background(), coredatasource.ListRequest{Entity: "slack.message", Limit: 1})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if result.Datasource != "slack.users" || result.Entity != "slack.user" || result.Total != 1 || !result.Complete {
+	if result.Datasource != "slack.messages" || result.Entity != "slack.message" || result.Total != 1 || !result.Complete {
 		t.Fatalf("result metadata = %#v", result)
 	}
-	if len(result.Records) != 1 || result.Records[0].ID != "U1" {
+	if len(result.Records) != 1 || result.Records[0].ID != "M1" {
 		t.Fatalf("records = %#v", result.Records)
 	}
 }
