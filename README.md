@@ -15,18 +15,11 @@ github.com/fluxplane/fluxplane-plugin
 - `datasource/`: SDK-facing aliases/helpers over `github.com/fluxplane/fluxplane-datasource`.
 - `management/`: plugin management backend contracts.
 - `management/local/`: local filesystem management backend.
-- `cli/` and `cmd/fluxplane-plugin`: reusable plugin management CLI.
-- `coreadapter/`: dex-to-core bridge for hosts that still use
-  `fluxplane-core` pluginhost/resource contribution contracts.
+- `cli/`: reusable plugin management command tree.
 
-The core adapter import path is:
-
-```text
-github.com/fluxplane/fluxplane-plugin/coreadapter
-```
-
-The root SDK packages remain core-free; `coreadapter` is intentionally isolated
-as the package that imports both Dex and Core.
+This SDK module is core-free and dex-free. Agent-runtime contribution bridging
+belongs in `fluxplane-core`; concrete plugin catalogs and binaries belong in
+`fluxplane-plugins`.
 
 ## Target direction
 
@@ -42,6 +35,8 @@ fluxplane-plugin/
 ```
 
 Reusable domain concepts should live in dedicated modules first (`fluxplane-datasource`, `fluxplane-operation`, `fluxplane-endpoint`, `fluxplane-secret`, etc.) and be re-exported by SDK packages only where that improves plugin author ergonomics.
+
+The default marketplace-aware `fluxplane-plugin` binary lives in `github.com/fluxplane/fluxplane-plugins/cmd/fluxplane-plugin`; this SDK module remains registry-agnostic.
 
 ## Validation
 

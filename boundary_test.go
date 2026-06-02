@@ -9,10 +9,11 @@ import (
 	"testing"
 )
 
-func TestSDKDoesNotImportCoreOrDex(t *testing.T) {
+func TestSDKDoesNotImportCoreDexOrPluginsRegistry(t *testing.T) {
 	forbidden := []string{
 		"github.com/fluxplane/fluxplane-" + "core",
 		"github.com/fluxplane/fluxplane-" + "dex",
+		"github.com/fluxplane/fluxplane-" + "plugins",
 	}
 	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
