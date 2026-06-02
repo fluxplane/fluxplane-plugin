@@ -16,14 +16,17 @@ github.com/fluxplane/fluxplane-plugin
 - `management/`: plugin management backend contracts.
 - `management/local/`: local filesystem management backend.
 - `cli/` and `cmd/fluxplane-plugin`: reusable plugin management CLI.
+- `coreadapter/`: dex-to-core bridge for hosts that still use
+  `fluxplane-core` pluginhost/resource contribution contracts.
 
-Runtime-specific adapters are intentionally not part of this module. The dex-to-core adapter remains in:
+The core adapter import path is:
 
 ```text
-github.com/fluxplane/fluxplane-dex/fluxplaneplugin
+github.com/fluxplane/fluxplane-plugin/coreadapter
 ```
 
-This keeps `fluxplane-plugin` focused on reusable contracts and SDK helpers rather than product/runtime glue.
+The root SDK packages remain core-free; `coreadapter` is intentionally isolated
+as the package that imports both Dex and Core.
 
 ## Target direction
 
