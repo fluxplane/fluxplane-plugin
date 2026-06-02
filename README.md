@@ -1,8 +1,8 @@
 # fluxplane-plugin
 
-Shared Fluxplane plugin SDK/protocol staging repository.
+Standalone Fluxplane plugin SDK and protocol module.
 
-This repository was seeded from `fluxplane-dex/fluxplaneplugin` with a literal copy so the adapter can be extracted incrementally without losing working behavior. The module path is now:
+The module path is:
 
 ```text
 github.com/fluxplane/fluxplane-plugin
@@ -10,47 +10,37 @@ github.com/fluxplane/fluxplane-plugin
 
 ## Current contents
 
-- `package fluxplaneplugin`: copied dex adapter package that bridges dex-managed plugins into Fluxplane host/plugin surfaces.
-- `protocol/`: copied dex stdio/framed plugin protocol package.
+- `protocol/`: stdio/framed plugin protocol package.
+- `host/`: reusable host capability DTOs and client helpers.
+- `datasource/`: SDK-facing aliases/helpers over `github.com/fluxplane/fluxplane-datasource`.
+- `management/`: plugin management backend contracts.
+- `management/local/`: local filesystem management backend.
+- `cli/` and `cmd/fluxplane-plugin`: reusable plugin management CLI.
 
-## Current state
+Runtime-specific adapters are intentionally not part of this module. The dex-to-core adapter remains in:
 
-This is intentionally a staging step, not the final lean SDK shape yet. The package still depends on:
+```text
+github.com/fluxplane/fluxplane-dex/fluxplaneplugin
+```
 
-- `github.com/fluxplane/fluxplane-core`
-- `github.com/fluxplane/fluxplane-dex`
-- shared datasource/endpoint/system modules
-
-The next refactor steps should split the copied adapter into smaller packages and move contracts out of core/dex where needed.
+This keeps `fluxplane-plugin` focused on reusable contracts and SDK helpers rather than product/runtime glue.
 
 ## Target direction
-
-Desired final shape:
 
 ```text
 fluxplane-plugin/
   protocol/       # stdio/framed protocol types and serve/client helpers
-  manifest/       # plugin manifest contracts
+  manifest/       # plugin manifest helpers that compose dedicated modules
   host/           # host capability interfaces: http, env, secret, endpoint, blob, provider
-  operation/      # operation specs and call/result contracts
-  datasource/     # datasource specs and call/result contracts
-  context/        # context provider contracts
-  binding/direct/ # direct in-process binding
-  binding/stdio/  # external stdio binding
+  datasource/     # datasource specs and call/result contracts via fluxplane-datasource
+  context/        # context provider contracts if SDK-only; otherwise move to fluxplane-context
+  schema/         # schema helpers if SDK-only
   testkit/        # fake host, manifest lint, protocol parity helpers
 ```
 
-## Immediate TODO
-
-1. Move dex/core plugin binding DTOs that are pure contracts into this module.
-2. Move context-provider contracts currently tied to `fluxplane-core` into a standalone module/package so plugins can expose context without depending on core.
-3. Replace direct imports of `fluxplane-dex` runtime types with protocol/host abstractions.
-4. Replace direct imports of `fluxplane-core` pluginhost/resource/reaction/evidence types with smaller shared contracts or adapter-only packages.
-5. Keep the current copied adapter working while the lean SDK packages are introduced.
+Reusable domain concepts should live in dedicated modules first (`fluxplane-datasource`, `fluxplane-operation`, `fluxplane-endpoint`, `fluxplane-secret`, etc.) and be re-exported by SDK packages only where that improves plugin author ergonomics.
 
 ## Validation
-
-Run tests outside the parent workspace until the root `go.work` includes this module:
 
 ```sh
 GOWORK=off go test ./...
