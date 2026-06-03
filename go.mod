@@ -7,6 +7,7 @@ require (
 	github.com/fluxplane/fluxplane-context v0.0.0
 	github.com/fluxplane/fluxplane-datasource v0.1.0
 	github.com/fluxplane/fluxplane-endpoint v0.2.0
+	github.com/fluxplane/fluxplane-evidence v0.1.0
 	github.com/fluxplane/fluxplane-operation v0.1.0
 	github.com/fluxplane/fluxplane-secret v0.2.0
 	github.com/invopop/jsonschema v0.14.0
@@ -30,3 +31,5 @@ require (
 replace github.com/fluxplane/fluxplane-operation v0.1.0 => ../fluxplane-operation
 
 replace github.com/fluxplane/fluxplane-context v0.0.0 => ../fluxplane-context
+
+replace github.com/fluxplane/fluxplane-evidence v0.1.0 => ../fluxplane-evidence

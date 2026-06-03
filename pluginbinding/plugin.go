@@ -20,6 +20,7 @@ type Plugin struct {
 	operations       map[string]operation
 	datasources      map[string][]datasourceHandler
 	contextProviders []contextProvider
+	observers        []evidenceObserver
 	commandHandlers  map[string]CommandHandler
 	secretGetter     SecretGetter
 }
@@ -44,6 +45,7 @@ type CommandHandler func(Context) protocol.Response
 type OperationHandler[I any, O any] func(Context, I) (O, error)
 type DatasourceHandler[I any, O any] func(Context, I) (O, error)
 type ContextProviderHandler func(Context, ContextBuildInput) (ContextBuildResult, error)
+type EvidenceObserverHandler func(Context, EvidenceObserveInput) (EvidenceObserveResult, error)
 
 type TextResult struct {
 	Text    string `json:"text,omitempty"`
@@ -71,6 +73,11 @@ type contextProvider interface {
 	Run(Context) protocol.Response
 }
 
+type evidenceObserver interface {
+	Spec() manifest.ObserverSpec
+	Observe(Context, EvidenceObserveInput) (EvidenceObserveResult, error)
+}
+
 type typedOperation[I any, O any] struct {
 	spec    manifest.OperationSpec
 	handler OperationHandler[I, O]
@@ -84,6 +91,11 @@ type typedDatasource[I any, O any] struct {
 type typedContextProvider struct {
 	spec    manifest.ContextSpec
 	handler ContextProviderHandler
+}
+
+type typedEvidenceObserver struct {
+	spec    manifest.ObserverSpec
+	handler EvidenceObserverHandler
 }
 
 type ContextBuildInput struct {
@@ -104,12 +116,16 @@ type ContextBuildResult struct {
 	Blocks []manifest.ContextBlock `json:"blocks"`
 }
 
+type EvidenceObserveInput = protocol.EvidenceObserveRequest
+type EvidenceObserveResult = protocol.EvidenceObserveResult
+
 func New(manifest manifest.PluginManifest) *Plugin {
 	return &Plugin{
 		manifest:         manifest,
 		operations:       map[string]operation{},
 		datasources:      map[string][]datasourceHandler{},
 		contextProviders: nil,
+		observers:        nil,
 		commandHandlers:  map[string]CommandHandler{},
 		secretGetter:     DefaultSecretGetter,
 	}
@@ -173,6 +189,20 @@ func ContextProvider(plugin *Plugin, spec manifest.ContextSpec, handler ContextP
 	}
 	plugin.contextProviders = append(plugin.contextProviders, typedContextProvider{spec: spec, handler: handler})
 	plugin.upsertContext(spec)
+}
+
+func EvidenceObserver(plugin *Plugin, spec manifest.ObserverSpec, handler EvidenceObserverHandler) {
+	if plugin == nil {
+		return
+	}
+	if strings.TrimSpace(spec.Name) == "" {
+		panic("pluginbinding: evidence observer name is required")
+	}
+	if handler == nil {
+		panic("pluginbinding: evidence observer handler is required")
+	}
+	plugin.observers = append(plugin.observers, typedEvidenceObserver{spec: spec, handler: handler})
+	plugin.upsertObserver(spec)
 }
 
 func (p *Plugin) Command(command string, handler CommandHandler) {
@@ -283,6 +313,8 @@ func (p *Plugin) HandleWithContextHostAndEvents(ctx stdcontext.Context, req prot
 		return p.runDatasource(bindingCtx, CapabilityLookup)
 	case protocol.CommandContextBuild:
 		return p.runContext(bindingCtx)
+	case protocol.CommandEvidenceObserve:
+		return p.runEvidence(bindingCtx)
 	case protocol.CommandEndpointsDiscover:
 		return OKData(map[string]any{"candidates": []manifest.EndpointCandidate{}})
 	default:
@@ -387,6 +419,16 @@ func (p *Plugin) upsertContext(spec manifest.ContextSpec) {
 	p.manifest.Context = append(p.manifest.Context, spec)
 }
 
+func (p *Plugin) upsertObserver(spec manifest.ObserverSpec) {
+	for i := range p.manifest.Observers {
+		if p.manifest.Observers[i].Name == spec.Name {
+			p.manifest.Observers[i] = spec
+			return
+		}
+	}
+	p.manifest.Observers = append(p.manifest.Observers, spec)
+}
+
 func (p *Plugin) runDatasource(ctx Context, capability string) protocol.Response {
 	handlers := p.datasources[capability]
 	if len(handlers) == 0 {
@@ -422,6 +464,48 @@ func (p *Plugin) runContext(ctx Context) protocol.Response {
 		out.Blocks = append(out.Blocks, result.Blocks...)
 	}
 	out.Blocks = filterContextBlocks(out.Blocks, input)
+	return protocol.OK(out)
+}
+
+func (p *Plugin) runEvidence(ctx Context) protocol.Response {
+	input, err := DecodePayload[EvidenceObserveInput](ctx.Request.Payload)
+	if err != nil {
+		return protocol.Fail("bad_payload", err.Error())
+	}
+	if len(p.observers) == 0 {
+		return protocol.OK(EvidenceObserveResult{Observations: []manifest.Observation{}})
+	}
+	var out EvidenceObserveResult
+	for _, observer := range p.observers {
+		spec := observer.Spec()
+		if spec.Phase != "" && input.Phase != "" && spec.Phase != input.Phase {
+			continue
+		}
+		result, err := observer.Observe(Context{Context: ctx.Context, Request: ctx.Request, Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p}, input)
+		if err != nil {
+			var pluginErr Error
+			if errors.As(err, &pluginErr) {
+				return protocol.Fail(pluginErr.Code, pluginErr.Message)
+			}
+			return protocol.Fail("plugin_error", err.Error())
+		}
+		for _, observation := range result.Observations {
+			if !observationKindAllowed(spec.ObservableKinds, observation.Kind) {
+				continue
+			}
+			if observation.Source == "" {
+				observation.Source = spec.Name
+			}
+			if observation.Environment.Name == "" {
+				observation.Environment = spec.Environment
+			}
+			out.Observations = append(out.Observations, observation)
+		}
+		out.Assertions = append(out.Assertions, result.Assertions...)
+	}
+	if out.Observations == nil {
+		out.Observations = []manifest.Observation{}
+	}
 	return protocol.OK(out)
 }
 
@@ -495,6 +579,14 @@ func (provider typedContextProvider) Run(ctx Context) protocol.Response {
 	return protocol.OK(out)
 }
 
+func (observer typedEvidenceObserver) Spec() manifest.ObserverSpec {
+	return observer.spec
+}
+
+func (observer typedEvidenceObserver) Observe(ctx Context, input EvidenceObserveInput) (EvidenceObserveResult, error) {
+	return observer.handler(ctx, input)
+}
+
 func (ctx Context) NormalizeContextBlock(block manifest.ContextBlock) manifest.ContextBlock {
 	if strings.TrimSpace(string(block.Kind)) == "" {
 		block.Kind = ContextKindText
@@ -518,6 +610,18 @@ func DecodeCallInput[T any](call protocol.OperationCall) (T, error) {
 		return input, fmt.Errorf("decode operation input: %w", err)
 	}
 	return input, nil
+}
+
+func observationKindAllowed(kinds []string, kind string) bool {
+	if len(kinds) == 0 {
+		return true
+	}
+	for _, candidate := range kinds {
+		if candidate == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func DecodePayload[T any](raw json.RawMessage) (T, error) {

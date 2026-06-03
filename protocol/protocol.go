@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+
+	evidence "github.com/fluxplane/fluxplane-evidence"
 )
 
 const (
@@ -33,6 +35,7 @@ const (
 	CommandDatasourcesBatchGet = "datasources.batch_get"
 	CommandDatasourcesLookup   = "datasources.lookup"
 	CommandContextBuild        = "context.build"
+	CommandEvidenceObserve     = "evidence.observe"
 	CommandEndpointsDiscover   = "endpoints.discover"
 	CommandIndexBuild          = "index.build"
 	CommandIndexStatus         = "index.status"
@@ -103,6 +106,16 @@ type OperationResult struct {
 
 type OperationBatchResult struct {
 	Results []OperationResult `json:"results"`
+}
+
+type EvidenceObserveRequest struct {
+	Phase        evidence.ObservationPhase `json:"phase,omitempty"`
+	Observations []evidence.Observation    `json:"observations,omitempty"`
+}
+
+type EvidenceObserveResult struct {
+	Observations []evidence.Observation `json:"observations,omitempty"`
+	Assertions   []evidence.Assertion   `json:"assertions,omitempty"`
 }
 
 func NewRequest(command, plugin string, payload any) (Request, error) {

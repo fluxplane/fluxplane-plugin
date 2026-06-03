@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	evidence "github.com/fluxplane/fluxplane-evidence"
 	manifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
@@ -202,6 +203,49 @@ func TestDefaultContextProviderReturnsEmptyBlocks(t *testing.T) {
 	}
 	if len(result.Blocks) != 0 {
 		t.Fatalf("blocks = %#v", result.Blocks)
+	}
+}
+
+func TestDefineRegistersEvidenceObserver(t *testing.T) {
+	spec := manifest.ObserverSpec{
+		Name:            "test.environment",
+		Description:     "Test environment.",
+		Environment:     evidence.Ref{Name: "test"},
+		Phase:           evidence.PhaseTurn,
+		ObservableKinds: []string{"test.ready"},
+		Dynamic:         true,
+	}
+	plugin := Define(ManifestSpec{Name: "test"},
+		RegisterEvidenceObserver(spec, func(_ Context, _ EvidenceObserveInput) (EvidenceObserveResult, error) {
+			return EvidenceObserveResult{Observations: []evidence.Observation{{
+				ID:      "test:ready",
+				Kind:    "test.ready",
+				Scope:   "test",
+				Content: map[string]any{"ready": true},
+			}, {
+				ID:   "test:ignored",
+				Kind: "test.ignored",
+			}}}, nil
+		}),
+	)
+	gotManifest := plugin.Manifest()
+	if len(gotManifest.Observers) != 1 || gotManifest.Observers[0].Name != "test.environment" {
+		t.Fatalf("observers = %#v", gotManifest.Observers)
+	}
+	resp := plugin.Handle(request(t, protocol.CommandEvidenceObserve, protocol.EvidenceObserveRequest{Phase: evidence.PhaseTurn}))
+	if !resp.OK {
+		t.Fatalf("evidence observe failed: %#v", resp.Error)
+	}
+	var result protocol.EvidenceObserveResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Observations) != 1 {
+		t.Fatalf("observations = %#v", result.Observations)
+	}
+	observation := result.Observations[0]
+	if observation.Kind != "test.ready" || observation.Source != "test.environment" || observation.Environment.Name != "test" {
+		t.Fatalf("observation = %#v", observation)
 	}
 }
 

@@ -107,6 +107,12 @@ func RegisterContextProvider(spec manifest.ContextSpec, handler ContextProviderH
 	}
 }
 
+func RegisterEvidenceObserver(spec manifest.ObserverSpec, handler EvidenceObserverHandler) PluginOption {
+	return func(plugin *Plugin) {
+		EvidenceObserver(plugin, spec, handler)
+	}
+}
+
 func TypedOperationSpec[I any, O any](name, description string, options ...OperationSpecOption) manifest.OperationSpec {
 	spec := OperationSpec(name, description, options...)
 	if len(spec.Input) == 0 {

@@ -8,6 +8,7 @@ import (
 	fpcontext "github.com/fluxplane/fluxplane-context"
 	datasource "github.com/fluxplane/fluxplane-datasource"
 	endpoint "github.com/fluxplane/fluxplane-endpoint"
+	evidence "github.com/fluxplane/fluxplane-evidence"
 	operation "github.com/fluxplane/fluxplane-operation"
 	secret "github.com/fluxplane/fluxplane-secret"
 )
@@ -27,17 +28,19 @@ type PluginEntry struct {
 }
 
 type PluginManifest struct {
-	Name        string            `json:"name"`
-	Version     string            `json:"version,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Aliases     []string          `json:"aliases,omitempty"`
-	Operations  []OperationSpec   `json:"operations,omitempty"`
-	Auth        []AuthMethod      `json:"auth,omitempty"`
-	Datasources []DatasourceSpec  `json:"datasources,omitempty"`
-	Context     []ContextSpec     `json:"context,omitempty"`
-	Endpoints   []EndpointSpec    `json:"endpoints,omitempty"`
-	Indexes     []IndexSpec       `json:"indexes,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Name              string                 `json:"name"`
+	Version           string                 `json:"version,omitempty"`
+	Description       string                 `json:"description,omitempty"`
+	Aliases           []string               `json:"aliases,omitempty"`
+	Operations        []OperationSpec        `json:"operations,omitempty"`
+	Auth              []AuthMethod           `json:"auth,omitempty"`
+	Datasources       []DatasourceSpec       `json:"datasources,omitempty"`
+	Context           []ContextSpec          `json:"context,omitempty"`
+	Observers         []ObserverSpec         `json:"observers,omitempty"`
+	AssertionDerivers []AssertionDeriverSpec `json:"assertion_derivers,omitempty"`
+	Endpoints         []EndpointSpec         `json:"endpoints,omitempty"`
+	Indexes           []IndexSpec            `json:"indexes,omitempty"`
+	Metadata          map[string]string      `json:"metadata,omitempty"`
 }
 
 type OperationSpec = operation.Declaration
@@ -153,6 +156,23 @@ const (
 )
 
 type ContextSpec = fpcontext.Spec
+
+type ObserverSpec = evidence.ObserverSpec
+type AssertionDeriverSpec = evidence.AssertionDeriverSpec
+type AssertionTemplate = evidence.AssertionTemplate
+type Observation = evidence.Observation
+type Assertion = evidence.Assertion
+type EvidenceRef = evidence.Ref
+type EvidenceName = evidence.Name
+type ObservationPhase = evidence.ObservationPhase
+
+const (
+	ObservationPhaseStartup      = evidence.PhaseStartup
+	ObservationPhaseSessionOpen  = evidence.PhaseSessionOpen
+	ObservationPhaseTurn         = evidence.PhaseTurn
+	ObservationPhaseToolFollowup = evidence.PhaseToolFollowup
+	ObservationPhaseLazy         = evidence.PhaseLazy
+)
 
 type EndpointSpec = endpoint.EndpointSpec
 type EndpointRef = endpoint.EndpointRef

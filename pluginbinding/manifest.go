@@ -31,6 +31,8 @@ type ManifestSpec struct {
 	Datasources        []manifest.DatasourceSpec
 	IndexedDatasources []IndexedDatasourceSpec
 	Context            []manifest.ContextSpec
+	Observers          []manifest.ObserverSpec
+	AssertionDerivers  []manifest.AssertionDeriverSpec
 	Endpoints          []manifest.EndpointSpec
 	Indexes            []manifest.IndexSpec
 	Metadata           map[string]string
@@ -66,17 +68,19 @@ func Manifest(spec ManifestSpec) manifest.PluginManifest {
 		indexes = append(indexes, Index(indexed.Name, indexDescription, indexed.Entity))
 	}
 	return manifest.PluginManifest{
-		Name:        spec.Name,
-		Version:     spec.Version,
-		Description: spec.Description,
-		Aliases:     append([]string(nil), spec.Aliases...),
-		Operations:  normalizeOperationSpecs(spec.Operations),
-		Auth:        append([]manifest.AuthMethod(nil), spec.Auth...),
-		Datasources: datasources,
-		Context:     append([]manifest.ContextSpec(nil), spec.Context...),
-		Endpoints:   append([]manifest.EndpointSpec(nil), spec.Endpoints...),
-		Indexes:     indexes,
-		Metadata:    cloneStringMap(spec.Metadata),
+		Name:              spec.Name,
+		Version:           spec.Version,
+		Description:       spec.Description,
+		Aliases:           append([]string(nil), spec.Aliases...),
+		Operations:        normalizeOperationSpecs(spec.Operations),
+		Auth:              append([]manifest.AuthMethod(nil), spec.Auth...),
+		Datasources:       datasources,
+		Context:           append([]manifest.ContextSpec(nil), spec.Context...),
+		Observers:         append([]manifest.ObserverSpec(nil), spec.Observers...),
+		AssertionDerivers: append([]manifest.AssertionDeriverSpec(nil), spec.AssertionDerivers...),
+		Endpoints:         append([]manifest.EndpointSpec(nil), spec.Endpoints...),
+		Indexes:           indexes,
+		Metadata:          cloneStringMap(spec.Metadata),
 	}
 }
 
