@@ -16,6 +16,7 @@ import (
 
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	"github.com/fluxplane/fluxplane-plugin/management"
+	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
@@ -59,6 +60,7 @@ func New(opts Options) *cobra.Command {
 		newDatasourceCommand(opts.Backend),
 		newLookupCommand(opts.Backend),
 		newContextCommand(opts.Backend),
+		newEvidenceCommand(opts.Backend),
 		newIndexCommand(opts.Backend),
 		newEndpointCommand(opts.Backend),
 		newRunCommand(opts.Backend),
@@ -976,6 +978,75 @@ func newContextBuildAllCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
 	cmd.Flags().StringArrayVar(&kinds, "kind", nil, "context block kind filter")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum context blocks per plugin")
+	return cmd
+}
+
+func newEvidenceCommand(backend management.Backend) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "evidence",
+		Short: "Inspect and run plugin evidence observers",
+	}
+	cmd.AddCommand(
+		newEvidenceListCommand(backend),
+		newEvidenceObserveCommand(backend),
+	)
+	return cmd
+}
+
+func newEvidenceListCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	cmd := &cobra.Command{
+		Use:   "list PLUGIN[@VERSION]",
+		Short: "List plugin evidence declarations",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.ListEvidence(cmd.Context(), management.EvidenceListRequest{Ref: parseRef(args[0]), Instance: instance})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	return cmd
+}
+
+func newEvidenceObserveCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var phase string
+	var input string
+	var inputFile string
+	cmd := &cobra.Command{
+		Use:   "observe PLUGIN[@VERSION]",
+		Short: "Run plugin evidence observers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			payload, err := readJSONPayload(input, inputFile)
+			if err != nil {
+				return err
+			}
+			result, err := backend.ObserveEvidence(cmd.Context(), management.EvidenceObserveRequest{
+				Ref:      parseRef(args[0]),
+				Instance: instance,
+				Phase:    sdkmanifest.ObservationPhase(strings.TrimSpace(phase)),
+				Input:    payload,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&phase, "phase", "", "observation phase")
+	cmd.Flags().StringVar(&input, "input", "", "evidence observe input JSON")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "evidence observe input JSON file")
 	return cmd
 }
 

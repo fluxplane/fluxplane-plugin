@@ -886,6 +886,48 @@ func (b *Backend) BuildContext(ctx context.Context, req management.ContextBuildR
 	return management.ContextBuildResult{Plugin: req.Ref, Instance: instance, Result: copyRaw(resp.Result)}, nil
 }
 
+// ListEvidence returns evidence declarations advertised by the plugin manifest.
+func (b *Backend) ListEvidence(ctx context.Context, req management.EvidenceListRequest) (management.EvidenceListResult, error) {
+	manifestResult, err := b.PluginManifest(ctx, management.ManifestRequest{Ref: req.Ref})
+	if err != nil {
+		return management.EvidenceListResult{}, err
+	}
+	var manifest sdkmanifest.PluginManifest
+	if err := json.Unmarshal(manifestResult.Manifest, &manifest); err != nil {
+		return management.EvidenceListResult{}, fmt.Errorf("fluxplane-plugin: decode plugin manifest: %w", err)
+	}
+	return management.EvidenceListResult{
+		Plugin:            req.Ref,
+		Instance:          normalizeInstance(req.Instance),
+		Observers:         append([]sdkmanifest.ObserverSpec(nil), manifest.Observers...),
+		AssertionDerivers: append([]sdkmanifest.AssertionDeriverSpec(nil), manifest.AssertionDerivers...),
+	}, nil
+}
+
+// ObserveEvidence asks a plugin runtime to produce evidence observations.
+func (b *Backend) ObserveEvidence(ctx context.Context, req management.EvidenceObserveRequest) (management.EvidenceObserveResult, error) {
+	plugin, err := b.installedPlugin(req.Ref)
+	if err != nil {
+		return management.EvidenceObserveResult{}, err
+	}
+	instance := normalizeInstance(req.Instance)
+	payload := copyRaw(req.Input)
+	if len(payload) == 0 {
+		payload, err = json.Marshal(protocol.EvidenceObserveRequest{
+			Phase:        req.Phase,
+			Observations: append([]sdkmanifest.Observation(nil), req.Observations...),
+		})
+		if err != nil {
+			return management.EvidenceObserveResult{}, err
+		}
+	}
+	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandEvidenceObserve, payload)
+	if err != nil {
+		return management.EvidenceObserveResult{}, err
+	}
+	return management.EvidenceObserveResult{Plugin: req.Ref, Instance: instance, Result: copyRaw(resp.Result)}, nil
+}
+
 // DiscoverEndpoints asks a plugin runtime to discover endpoint candidates.
 func (b *Backend) DiscoverEndpoints(ctx context.Context, req management.EndpointDiscoverRequest) (management.EndpointDiscoverResult, error) {
 	plugin, err := b.installedPlugin(req.Ref)

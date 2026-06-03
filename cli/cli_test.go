@@ -14,25 +14,27 @@ import (
 )
 
 type fakeBackend struct {
-	installed       management.InstallRequest
-	updated         management.UpdateRequest
-	enabled         management.SetEnabledRequest
-	connected       management.AuthConnectRequest
-	authAuto        management.AuthAutoRequest
-	invoked         management.OperationInvokeRequest
-	batched         management.OperationBatchRequest
-	datasource      management.DatasourceCallRequest
-	built           management.ContextBuildRequest
-	indexBuilt      management.IndexBuildRequest
-	indexStatusReq  management.IndexStatusRequest
-	discovered      management.EndpointDiscoverRequest
-	endpointListed  management.EndpointListRequest
-	endpointList    management.EndpointListResult
-	endpointGot     management.EndpointGetRequest
-	endpointGet     management.EndpointGetResult
-	endpointSaved   management.EndpointSaveRequest
-	endpointHealth  management.EndpointHealthRequest
-	endpointRemoved management.EndpointRemoveRequest
+	installed        management.InstallRequest
+	updated          management.UpdateRequest
+	enabled          management.SetEnabledRequest
+	connected        management.AuthConnectRequest
+	authAuto         management.AuthAutoRequest
+	invoked          management.OperationInvokeRequest
+	batched          management.OperationBatchRequest
+	datasource       management.DatasourceCallRequest
+	built            management.ContextBuildRequest
+	evidenceListed   management.EvidenceListRequest
+	evidenceObserved management.EvidenceObserveRequest
+	indexBuilt       management.IndexBuildRequest
+	indexStatusReq   management.IndexStatusRequest
+	discovered       management.EndpointDiscoverRequest
+	endpointListed   management.EndpointListRequest
+	endpointList     management.EndpointListResult
+	endpointGot      management.EndpointGetRequest
+	endpointGet      management.EndpointGetResult
+	endpointSaved    management.EndpointSaveRequest
+	endpointHealth   management.EndpointHealthRequest
+	endpointRemoved  management.EndpointRemoveRequest
 }
 
 func (f *fakeBackend) InstallPlugin(_ context.Context, req management.InstallRequest) (management.InstallResult, error) {
@@ -134,6 +136,16 @@ func (f *fakeBackend) ListContextProviders(_ context.Context, req management.Con
 func (f *fakeBackend) BuildContext(_ context.Context, req management.ContextBuildRequest) (management.ContextBuildResult, error) {
 	f.built = req
 	return management.ContextBuildResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"blocks":[]}`)}, nil
+}
+
+func (f *fakeBackend) ListEvidence(_ context.Context, req management.EvidenceListRequest) (management.EvidenceListResult, error) {
+	f.evidenceListed = req
+	return management.EvidenceListResult{Plugin: req.Ref, Instance: req.Instance, Observers: []sdkmanifest.ObserverSpec{{Name: req.Ref.Name + ".environment"}}}, nil
+}
+
+func (f *fakeBackend) ObserveEvidence(_ context.Context, req management.EvidenceObserveRequest) (management.EvidenceObserveResult, error) {
+	f.evidenceObserved = req
+	return management.EvidenceObserveResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"observations":[]}`)}, nil
 }
 
 func (f *fakeBackend) BuildIndex(_ context.Context, req management.IndexBuildRequest) (management.IndexBuildResult, error) {
@@ -418,6 +430,42 @@ func TestContextBuildAllCommandUsesContextPlugins(t *testing.T) {
 	if out.Len() == 0 {
 		t.Fatalf("expected JSON output")
 	}
+}
+
+func TestEvidenceCommandsUseBackend(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"evidence", "list", "aws", "--instance", "work"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.evidenceListed.Ref.Name != "aws" || backend.evidenceListed.Instance != "work" {
+			t.Fatalf("evidence list request = %#v", backend.evidenceListed)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("observe", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"evidence", "observe", "aws", "--instance", "work", "--phase", "turn", "--input", `{"phase":"turn"}`})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.evidenceObserved.Ref.Name != "aws" || backend.evidenceObserved.Instance != "work" || backend.evidenceObserved.Phase != "turn" {
+			t.Fatalf("evidence observe request = %#v", backend.evidenceObserved)
+		}
+		if string(backend.evidenceObserved.Input) != `{"phase":"turn"}` {
+			t.Fatalf("evidence observe input = %s", string(backend.evidenceObserved.Input))
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
 }
 
 func TestIndexCommandsUseBackend(t *testing.T) {

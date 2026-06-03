@@ -370,6 +370,36 @@ type ContextBuildResult struct {
 	Result   json.RawMessage `json:"result,omitempty"`
 }
 
+// EvidenceListRequest describes an evidence declaration listing request.
+type EvidenceListRequest struct {
+	Ref      Ref    `json:"ref"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// EvidenceListResult contains evidence declarations advertised by a plugin.
+type EvidenceListResult struct {
+	Plugin            Ref                                `json:"plugin"`
+	Instance          string                             `json:"instance,omitempty"`
+	Observers         []sdkmanifest.ObserverSpec         `json:"observers,omitempty"`
+	AssertionDerivers []sdkmanifest.AssertionDeriverSpec `json:"assertion_derivers,omitempty"`
+}
+
+// EvidenceObserveRequest asks a plugin runtime to produce observations.
+type EvidenceObserveRequest struct {
+	Ref          Ref                          `json:"ref"`
+	Instance     string                       `json:"instance,omitempty"`
+	Phase        sdkmanifest.ObservationPhase `json:"phase,omitempty"`
+	Input        json.RawMessage              `json:"input,omitempty"`
+	Observations []sdkmanifest.Observation    `json:"observations,omitempty"`
+}
+
+// EvidenceObserveResult contains an evidence observe result payload.
+type EvidenceObserveResult struct {
+	Plugin   Ref             `json:"plugin"`
+	Instance string          `json:"instance,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+}
+
 // IndexBuildRequest asks a plugin to build one or more local index snapshots.
 type IndexBuildRequest struct {
 	Ref      Ref    `json:"ref"`
@@ -565,6 +595,12 @@ type ContextRunner interface {
 	BuildContext(context.Context, ContextBuildRequest) (ContextBuildResult, error)
 }
 
+// EvidenceRunner lists and invokes plugin evidence observers.
+type EvidenceRunner interface {
+	ListEvidence(context.Context, EvidenceListRequest) (EvidenceListResult, error)
+	ObserveEvidence(context.Context, EvidenceObserveRequest) (EvidenceObserveResult, error)
+}
+
 // EndpointRunner invokes plugin endpoint discovery.
 type EndpointRunner interface {
 	DiscoverEndpoints(context.Context, EndpointDiscoverRequest) (EndpointDiscoverResult, error)
@@ -596,6 +632,7 @@ type Backend interface {
 	OperationRunner
 	DatasourceRunner
 	ContextRunner
+	EvidenceRunner
 	EndpointRunner
 	IndexManager
 	EndpointStore
