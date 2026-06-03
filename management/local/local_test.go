@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,10 +13,12 @@ import (
 	"time"
 
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
+	sdkhost "github.com/fluxplane/fluxplane-plugin/host"
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/pluginbinding"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
+	sharedsecret "github.com/fluxplane/fluxplane-secret"
 )
 
 func TestBackendInstallListManifestRemove(t *testing.T) {
@@ -83,6 +86,35 @@ func TestBackendInstallListManifestRemove(t *testing.T) {
 	if !removed.Removed {
 		t.Fatalf("removed = %#v", removed)
 	}
+}
+
+func TestCLIHostProcessRun(t *testing.T) {
+	raw, err := (cliHost{}).CallHost(protocol.HostCapabilityProcessRun, sdkhost.ProcessRunRequest{
+		Command:   os.Args[0],
+		Args:      []string{"-test.run=TestHelperProcess", "--", "process-run"},
+		Env:       []string{"GO_WANT_HELPER_PROCESS=1"},
+		MaxStdout: 5,
+		MaxStderr: 32,
+	})
+	if err != nil {
+		t.Fatalf("CallHost: %v", err)
+	}
+	var resp sdkhost.ProcessRunResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ExitCode != 7 || resp.Stdout != "hello" || !resp.StdoutTruncated || resp.Stderr != "problem\n" {
+		t.Fatalf("response = %#v", resp)
+	}
+}
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stdout, "hello world")
+	fmt.Fprint(os.Stderr, "problem\n")
+	os.Exit(7)
 }
 
 func TestBackendAuthState(t *testing.T) {
@@ -274,19 +306,38 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 		t.Fatalf("methods = %#v", methods)
 	}
 	t.Setenv("FLUXPLANE_TEST_ACCESS_TOKEN", "env-secret")
+	t.Setenv("FLUXPLANE_TEST_URL", "https://test.example.com")
 	autoConnected, err := backend.AuthAuto(context.Background(), management.AuthAutoRequest{Ref: ref, Instance: "env"})
 	if err != nil {
 		t.Fatalf("AuthAuto: %v", err)
 	}
-	if !autoConnected.Changed || len(autoConnected.Saved) != 1 || autoConnected.Saved[0] != "access_token" || len(autoConnected.Missing) != 0 {
+	if !autoConnected.Changed || len(autoConnected.Saved) != 1 || autoConnected.Saved[0] != "access_token" || len(autoConnected.Endpoints) != 1 || len(autoConnected.Missing) != 0 {
 		t.Fatalf("auto connected = %#v", autoConnected)
 	}
 	autoStatus, err := backend.AuthStatus(context.Background(), management.AuthStatusRequest{Ref: ref, Instance: "env"})
 	if err != nil {
 		t.Fatalf("AuthStatus auto: %v", err)
 	}
-	if len(autoStatus.Auth) != 1 || autoStatus.Auth[0].Metadata["access_token"] != "env-secret" {
+	if len(autoStatus.Auth) != 1 || autoStatus.Auth[0].Metadata["access_token_ref"] != "plugin/test/env/access_token" || autoStatus.Auth[0].Metadata["endpoint_ref"] == "" {
 		t.Fatalf("auto status = %#v", autoStatus)
+	}
+	storedSecret, ok, err := backend.secretStore.LoadSecret(context.Background(), sharedsecret.Plugin("test", "env", "access_token"))
+	if err != nil || !ok || storedSecret.Value != "env-secret" {
+		t.Fatalf("stored secret ok=%v err=%v secret=%#v", ok, err, storedSecret)
+	}
+	status, err := backend.PluginStatus(context.Background(), management.StatusRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("PluginStatus endpoint config: %v", err)
+	}
+	var envInstance management.Instance
+	for _, instance := range status.Instances {
+		if instance.Name == "env" {
+			envInstance = instance
+			break
+		}
+	}
+	if envInstance.Config["endpoint_ref"] == "" {
+		t.Fatalf("env instance config = %#v", envInstance.Config)
 	}
 	connected, err := backend.AuthConnect(context.Background(), management.AuthConnectRequest{Ref: ref, Method: "token", Metadata: map[string]string{"access_token": "secret"}})
 	if err != nil {
@@ -510,10 +561,10 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEndpoints: %v", err)
 	}
-	if len(listedEndpoints.Endpoints) != 1 || listedEndpoints.Endpoints[0].ID != "test-endpoint" {
+	if !hasEndpoint(listedEndpoints.Endpoints, "test-endpoint") {
 		t.Fatalf("listed endpoints = %#v", listedEndpoints)
 	}
-	if len(listedEndpoints.Records) != 1 || listedEndpoints.Records[0].ID != "test-endpoint" || listedEndpoints.Records[0].CreatedAt.IsZero() {
+	if !hasEndpointRecord(listedEndpoints.Records, "test-endpoint") {
 		t.Fatalf("listed endpoint records = %#v", listedEndpoints.Records)
 	}
 	got, err := backend.GetEndpoint(context.Background(), management.EndpointGetRequest{ID: "@endpoint/test-endpoint"})
@@ -564,7 +615,7 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEndpoints after remove: %v", err)
 	}
-	if len(empty.Endpoints) != 0 {
+	if hasEndpoint(empty.Endpoints, "test-endpoint") {
 		t.Fatalf("endpoints after remove = %#v", empty)
 	}
 }
@@ -588,6 +639,24 @@ func testRuntimeSpec() management.RuntimeSpec {
 func hasOperation(operations []sdkmanifest.OperationSpec, name string) bool {
 	for _, operation := range operations {
 		if operation.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEndpoint(endpoints []fpendpoint.EndpointRef, id string) bool {
+	for _, endpoint := range endpoints {
+		if endpoint.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEndpointRecord(records []fpendpoint.Record, id string) bool {
+	for _, record := range records {
+		if record.ID == id && !record.CreatedAt.IsZero() {
 			return true
 		}
 	}
@@ -645,6 +714,11 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 		}},
 		Datasources: []sdkmanifest.DatasourceSpec{datasourceSpec},
 		Context:     []sdkmanifest.ContextSpec{contextSpec},
+		Endpoints: []sdkmanifest.EndpointSpec{{
+			Name:     "test.endpoint",
+			Products: []string{"test"},
+			Env:      []string{"FLUXPLANE_TEST_URL"},
+		}},
 	},
 		pluginbinding.WithAuthConnectText("connected"),
 		pluginbinding.WithHostManagedAuthTest("test"),

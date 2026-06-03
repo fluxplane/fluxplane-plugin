@@ -7,14 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	osuser "os/user"
 	"path/filepath"
 	stdRuntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
@@ -23,6 +28,7 @@ import (
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/pluginruntime"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
+	sharedsecret "github.com/fluxplane/fluxplane-secret"
 )
 
 // Backend stores plugin metadata in a local JSON state file.
@@ -31,6 +37,7 @@ type Backend struct {
 	binDir           string
 	marketplace      sdkmanifest.Marketplace
 	marketplacePaths []string
+	secretStore      sharedsecret.FileStore
 }
 
 // Option configures a local backend.
@@ -66,6 +73,13 @@ func WithMarketplacePath(path string) Option {
 	}
 }
 
+// WithSecretStore configures where plugin auth secrets are persisted.
+func WithSecretStore(store sharedsecret.FileStore) Option {
+	return func(b *Backend) {
+		b.secretStore = store
+	}
+}
+
 // New returns a filesystem-backed plugin management backend.
 func New(opts ...Option) (*Backend, error) {
 	backend := &Backend{}
@@ -81,6 +95,9 @@ func New(opts ...Option) (*Backend, error) {
 	}
 	if strings.TrimSpace(backend.binDir) == "" {
 		backend.binDir = filepath.Join(filepath.Dir(backend.path), "bin")
+	}
+	if strings.TrimSpace(backend.secretStore.Dir) == "" {
+		backend.secretStore = sharedsecret.NewFileStore("")
 	}
 	if len(backend.marketplace.Plugins) == 0 {
 		if len(backend.marketplacePaths) == 0 {
@@ -167,6 +184,7 @@ type state struct {
 	Plugins   map[string]storedPlugin   `json:"plugins,omitempty"`
 	Instances map[string]storedInstance `json:"instances,omitempty"`
 	Endpoints map[string]storedEndpoint `json:"endpoints,omitempty"`
+	Processes map[string]storedProcess  `json:"processes,omitempty"`
 }
 
 type storedPlugin struct {
@@ -182,6 +200,22 @@ type storedInstance struct {
 type storedEndpoint struct {
 	Endpoint  fpendpoint.Record `json:"endpoint"`
 	UpdatedAt time.Time         `json:"updated_at,omitempty"`
+}
+
+type storedProcess struct {
+	ID           string            `json:"id"`
+	Command      string            `json:"command"`
+	Args         []string          `json:"args,omitempty"`
+	Workdir      string            `json:"workdir,omitempty"`
+	PID          int               `json:"pid,omitempty"`
+	ProcessGroup int               `json:"process_group,omitempty"`
+	LogPath      string            `json:"log_path,omitempty"`
+	Plugin       string            `json:"plugin,omitempty"`
+	Instance     string            `json:"instance,omitempty"`
+	Group        string            `json:"group,omitempty"`
+	Tags         []string          `json:"tags,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	StartedAt    time.Time         `json:"started_at,omitempty"`
 }
 
 // InstallPlugin installs or records a plugin in the local store.
@@ -616,17 +650,34 @@ func (b *Backend) AuthConnect(ctx context.Context, req management.AuthConnectReq
 	if !ok {
 		return management.AuthResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is not installed", req.Ref.Key())
 	}
+	manifest, err := b.manifestForPlugin(ctx, plugin, normalizeInstance(req.Instance))
+	if err != nil {
+		return management.AuthResult{}, err
+	}
 	now := time.Now().UTC()
 	instance := b.instance(st, req.Ref, normalizeInstance(req.Instance))
-	auth := management.AuthState{Method: normalizeMethod(req.Method), Connected: true, ConnectedAt: now, TestedAt: now, Metadata: req.Metadata}
+	method := authMethodName(req.Method, manifest.Auth)
+	auth := management.AuthState{Method: method, Connected: true, ConnectedAt: now, TestedAt: now}
 	if req.DryRun {
+		auth.Metadata = authStateMetadata(manifest.Name, instance.Name, req.Metadata, manifestAuthFields(manifest.Auth, method), nil)
+		auth.Metadata = mergeAuthEndpointMetadata(auth.Metadata, normalizedAuthEndpoints(req.Endpoints, manifest, req.Ref.Name, instance.Name))
 		return management.AuthResult{Plugin: req.Ref, Instance: instance.Name, Auth: auth, Connected: true, Changed: false, Message: "dry run"}, nil
 	}
-	if _, err := b.invokePlugin(ctx, plugin, instance.Name, protocol.CommandAuthConnect, sdkmanifest.AuthMaterial{Method: auth.Method, Values: auth.Metadata}); err != nil {
+	if _, err := b.invokePlugin(ctx, plugin, instance.Name, protocol.CommandAuthConnect, sdkmanifest.AuthMaterial{Method: auth.Method, Values: req.Metadata}); err != nil {
 		auth.Connected = false
 		auth.Error = err.Error()
 		return management.AuthResult{}, err
 	}
+	savedRefs, err := b.saveAuthSecrets(ctx, firstNonEmpty(manifest.Name, req.Ref.Name), instance.Name, req.Metadata, manifestAuthFields(manifest.Auth, method))
+	if err != nil {
+		return management.AuthResult{}, err
+	}
+	endpoints := normalizedAuthEndpoints(req.Endpoints, manifest, req.Ref.Name, instance.Name)
+	if err := applyAuthEndpoints(&st, &instance, endpoints, now); err != nil {
+		return management.AuthResult{}, err
+	}
+	auth.Metadata = authStateMetadata(firstNonEmpty(manifest.Name, req.Ref.Name), instance.Name, req.Metadata, manifestAuthFields(manifest.Auth, method), savedRefs)
+	auth.Metadata = mergeAuthEndpointMetadata(auth.Metadata, endpoints)
 	changed := upsertAuth(&instance, auth)
 	instance.UpdatedAt = now
 	st.Instances[instanceKey(req.Ref, instance.Name)] = storedInstance{Instance: instance}
@@ -639,6 +690,14 @@ func (b *Backend) AuthConnect(ctx context.Context, req management.AuthConnectReq
 // AuthAuto imports manifest-declared auth fields from environment variables.
 func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) (management.AuthAutoResult, error) {
 	if err := validateRef(req.Ref); err != nil {
+		return management.AuthAutoResult{}, err
+	}
+	plugin, err := b.installedPlugin(req.Ref)
+	if err != nil {
+		return management.AuthAutoResult{}, err
+	}
+	manifest, err := b.manifestForPlugin(ctx, plugin, normalizeInstance(req.Instance))
+	if err != nil {
 		return management.AuthAutoResult{}, err
 	}
 	methods, err := b.AuthMethods(ctx, management.AuthMethodsRequest{Ref: req.Ref, Instance: req.Instance})
@@ -668,7 +727,9 @@ func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) 
 			result.Skipped = append(result.Skipped, name)
 		}
 	}
-	if len(metadataByMethod) == 0 {
+	endpoints := authEndpointsFromEnv(manifest, req.Ref.Name, instance)
+	result.Endpoints = endpoints
+	if len(metadataByMethod) == 0 && len(endpoints) == 0 {
 		if req.DryRun {
 			result.Message = "dry run"
 		}
@@ -681,10 +742,23 @@ func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) 
 	}
 	for method, metadata := range metadataByMethod {
 		auth, err := b.AuthConnect(ctx, management.AuthConnectRequest{
-			Ref:      req.Ref,
-			Instance: instance,
-			Method:   method,
-			Metadata: metadata,
+			Ref:       req.Ref,
+			Instance:  instance,
+			Method:    method,
+			Metadata:  metadata,
+			Endpoints: endpoints,
+		})
+		if err != nil {
+			return result, err
+		}
+		result.Changed = result.Changed || auth.Changed
+	}
+	if len(metadataByMethod) == 0 && len(endpoints) > 0 {
+		auth, err := b.AuthConnect(ctx, management.AuthConnectRequest{
+			Ref:       req.Ref,
+			Instance:  instance,
+			Method:    authMethodName("", manifest.Auth),
+			Endpoints: endpoints,
 		})
 		if err != nil {
 			return result, err
@@ -1171,17 +1245,54 @@ func (b *Backend) invokePlugin(ctx context.Context, plugin storedPlugin, instanc
 	if err != nil {
 		return protocol.Response{}, err
 	}
-	resp, err := host.Invoke(ctx, plugin.Ref.Name, command, payload, pluginruntime.WithInstance(normalizeInstance(instance)), pluginruntime.WithHostCaller(cliHost{}))
+	resp, err := host.Invoke(ctx, plugin.Ref.Name, command, payload,
+		pluginruntime.WithInstance(normalizeInstance(instance)),
+		pluginruntime.WithConfig(b.instanceConfig(plugin.Ref, instance)),
+		pluginruntime.WithHostCaller(cliHost{backend: b, plugin: plugin.Ref.Name, instance: normalizeInstance(instance)}),
+	)
 	if err != nil {
 		return resp, fmt.Errorf("fluxplane-plugin: invoke %s on plugin %q: %w", command, plugin.Ref.Key(), err)
 	}
 	return resp, nil
 }
 
-type cliHost struct{}
+func (b *Backend) instanceConfig(ref management.Ref, name string) map[string]any {
+	st, err := b.readState()
+	if err != nil {
+		return nil
+	}
+	instance := b.instance(st, ref, normalizeInstance(name))
+	return cloneAnyMap(instance.Config)
+}
 
-func (cliHost) CallHost(command string, payload any) (json.RawMessage, error) {
+type cliHost struct {
+	backend  *Backend
+	plugin   string
+	instance string
+}
+
+func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) {
 	switch strings.TrimSpace(command) {
+	case sdkhost.SecretGetCommand:
+		var req struct {
+			Purpose string `json:"purpose"`
+		}
+		if err := decodeHostPayload(payload, &req); err != nil {
+			return nil, err
+		}
+		value, _, err := h.resolveSecret(req.Purpose)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(sdkhost.SecretMaterial{Purpose: strings.TrimSpace(req.Purpose), Value: value})
+	case protocol.HostCapabilityHTTPDo:
+		return h.httpDo(payload)
+	case sdkhost.EndpointResolve:
+		endpoint, err := h.endpointRefFromPayload(payload)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(endpoint)
 	case protocol.HostCapabilityEnvLookup:
 		var req sdkhost.EnvLookupRequest
 		if err := decodeHostPayload(payload, &req); err != nil {
@@ -1189,6 +1300,12 @@ func (cliHost) CallHost(command string, payload any) (json.RawMessage, error) {
 		}
 		value, found := os.LookupEnv(strings.TrimSpace(req.Key))
 		return json.Marshal(sdkhost.EnvLookupResponse{Key: strings.TrimSpace(req.Key), Value: value, Found: found})
+	case protocol.HostCapabilityProcessRun:
+		return h.processRun(payload)
+	case protocol.HostCapabilityProcessStart:
+		return h.processStart(payload)
+	case protocol.HostCapabilityProcessStop:
+		return h.processStop(payload)
 	case protocol.HostCapabilityProviderCall:
 		var req sdkhost.ProviderCallRequest
 		if err := decodeHostPayload(payload, &req); err != nil {
@@ -1209,6 +1326,390 @@ func (cliHost) CallHost(command string, payload any) (json.RawMessage, error) {
 
 func (cliHost) EmitHostEvent(string, any) error {
 	return nil
+}
+
+func (h cliHost) processRun(payload any) (json.RawMessage, error) {
+	var req sdkhost.ProcessRunRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	command, err := validatedProcessCommand(req.Command)
+	if err != nil {
+		return nil, err
+	}
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if req.TimeoutMS > 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMS)*time.Millisecond)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, command, req.Args...)
+	if strings.TrimSpace(req.Workdir) != "" {
+		cmd.Dir = strings.TrimSpace(req.Workdir)
+	}
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
+	stdout := &limitedBuffer{limit: req.MaxStdout}
+	stderr := &limitedBuffer{limit: req.MaxStderr}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	start := time.Now()
+	err = cmd.Run()
+	duration := time.Since(start)
+	timedOut := ctx.Err() == context.DeadlineExceeded
+	exitCode := 0
+	if err != nil {
+		switch typed := err.(type) {
+		case *exec.ExitError:
+			exitCode = typed.ExitCode()
+		default:
+			if timedOut {
+				exitCode = -1
+			} else {
+				return nil, err
+			}
+		}
+	}
+	resp := sdkhost.ProcessRunResponse{
+		Command:         command,
+		Args:            append([]string(nil), req.Args...),
+		Workdir:         strings.TrimSpace(req.Workdir),
+		ExitCode:        exitCode,
+		TimedOut:        timedOut,
+		DurationMS:      duration.Milliseconds(),
+		Stdout:          stdout.String(),
+		Stderr:          stderr.String(),
+		StdoutTruncated: stdout.Truncated(),
+		StderrTruncated: stderr.Truncated(),
+	}
+	return json.Marshal(resp)
+}
+
+func (h cliHost) processStart(payload any) (json.RawMessage, error) {
+	var req sdkhost.ProcessStartRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	if h.backend == nil {
+		return nil, fmt.Errorf("process store is unavailable")
+	}
+	command, err := validatedProcessCommand(req.Command)
+	if err != nil {
+		return nil, err
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		id = processID(command)
+	}
+	logPath := strings.TrimSpace(req.LogPath)
+	if logPath == "" {
+		logPath = filepath.Join(filepath.Dir(h.backend.path), "processes", id+".log")
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return nil, err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(command, req.Args...)
+	if strings.TrimSpace(req.Workdir) != "" {
+		cmd.Dir = strings.TrimSpace(req.Workdir)
+	}
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	startedAt := time.Now().UTC()
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return nil, err
+	}
+	_ = logFile.Close()
+	pid := cmd.Process.Pid
+	go func() { _ = cmd.Wait() }()
+
+	record := storedProcess{
+		ID: id, Command: command, Args: append([]string(nil), req.Args...), Workdir: strings.TrimSpace(req.Workdir),
+		PID: pid, ProcessGroup: pid, LogPath: logPath, Plugin: h.plugin, Instance: h.instance, Group: strings.TrimSpace(req.Group),
+		Tags: append([]string(nil), req.Tags...), Metadata: cloneStringMap(req.Metadata), StartedAt: startedAt,
+	}
+	if err := h.storeProcess(record); err != nil {
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		return nil, err
+	}
+	if marker := strings.TrimSpace(req.StartedOK); marker != "" {
+		timeout := time.Duration(req.TimeoutMS) * time.Millisecond
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		if err := waitForLogMarker(logPath, marker, timeout); err != nil {
+			_, _ = h.stopStoredProcess(sdkhost.ProcessStopRequest{ID: id, Signal: "SIGTERM"})
+			return nil, err
+		}
+	}
+	return json.Marshal(sdkhost.ProcessStartResponse{
+		ID: id, Command: command, Args: append([]string(nil), req.Args...), Workdir: strings.TrimSpace(req.Workdir),
+		PID: pid, ProcessGroup: pid, LogPath: logPath, StartedAt: startedAt,
+	})
+}
+
+func (h cliHost) processStop(payload any) (json.RawMessage, error) {
+	var req sdkhost.ProcessStopRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	resp, err := h.stopStoredProcess(req)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(resp)
+}
+
+func (h cliHost) httpDo(payload any) (json.RawMessage, error) {
+	var req sdkhost.HTTPRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	urlString, err := h.httpURL(req)
+	if err != nil {
+		return nil, err
+	}
+	headers, err := h.resolveHTTPAuth(req.Headers, req.Auth)
+	if err != nil {
+		return nil, err
+	}
+	method := strings.TrimSpace(req.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+	httpReq, err := http.NewRequest(method, urlString, bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range headers {
+		if strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
+			httpReq.Header.Set(key, value)
+		}
+	}
+	if strings.TrimSpace(req.UserAgent) != "" {
+		httpReq.Header.Set("User-Agent", strings.TrimSpace(req.UserAgent))
+	}
+	client := &http.Client{}
+	if req.TimeoutMS > 0 {
+		client.Timeout = time.Duration(req.TimeoutMS) * time.Millisecond
+	}
+	start := time.Now()
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	limit := int64(req.MaxBytes)
+	if limit <= 0 {
+		limit = 4 * 1024 * 1024
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	truncated := int64(len(body)) > limit
+	if truncated {
+		body = body[:limit]
+	}
+	return json.Marshal(sdkhost.HTTPResponse{
+		URL:         urlString,
+		FinalURL:    resp.Request.URL.String(),
+		Method:      method,
+		Status:      resp.Status,
+		StatusCode:  resp.StatusCode,
+		Headers:     map[string][]string(resp.Header),
+		ContentType: resp.Header.Get("Content-Type"),
+		Body:        body,
+		Truncated:   truncated,
+		DurationMS:  time.Since(start).Milliseconds(),
+	})
+}
+
+func (h cliHost) httpURL(req sdkhost.HTTPRequest) (string, error) {
+	raw := strings.TrimSpace(req.URL)
+	if raw == "" {
+		endpoint, err := h.endpointRef(strings.TrimSpace(req.EndpointRef))
+		if err != nil {
+			return "", err
+		}
+		raw = endpoint.URL
+	}
+	if raw == "" {
+		return "", fmt.Errorf("host HTTP URL is required")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(req.Path) != "" {
+		joined, err := url.JoinPath(parsed.String(), req.Path)
+		if err != nil {
+			return "", err
+		}
+		parsed, err = url.Parse(joined)
+		if err != nil {
+			return "", err
+		}
+	}
+	query := parsed.Query()
+	for key, values := range req.Query {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func (h cliHost) endpointRefFromPayload(payload any) (fpendpoint.EndpointRef, error) {
+	var req struct {
+		EndpointRef string `json:"endpoint_ref"`
+	}
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return fpendpoint.EndpointRef{}, err
+	}
+	return h.endpointRef(req.EndpointRef)
+}
+
+func (h cliHost) endpointRef(ref string) (fpendpoint.EndpointRef, error) {
+	if h.backend == nil {
+		return fpendpoint.EndpointRef{}, fmt.Errorf("endpoint store is unavailable")
+	}
+	id := fpendpoint.ParseRef(ref).ID()
+	if id == "" {
+		return fpendpoint.EndpointRef{}, fmt.Errorf("endpoint ref is required")
+	}
+	got, err := h.backend.GetEndpoint(context.Background(), management.EndpointGetRequest{ID: id})
+	if err != nil {
+		return fpendpoint.EndpointRef{}, err
+	}
+	if !got.Found {
+		return fpendpoint.EndpointRef{}, fmt.Errorf("endpoint %q is not stored", id)
+	}
+	return got.Endpoint.Normalize(), nil
+}
+
+func (h cliHost) resolveHTTPAuth(headers map[string]string, auth *sdkhost.HTTPAuthRequest) (map[string]string, error) {
+	out := map[string]string{}
+	for key, value := range headers {
+		out[key] = value
+	}
+	if auth == nil {
+		return out, nil
+	}
+	if strings.TrimSpace(out["Authorization"]) == "" {
+		if purpose := strings.TrimSpace(auth.BearerTokenPurpose); purpose != "" {
+			if value, ok, err := h.resolveSecret(purpose); err != nil {
+				return nil, err
+			} else if ok {
+				out["Authorization"] = "Bearer " + value
+			}
+		}
+	}
+	for header, purpose := range auth.HeaderPurposes {
+		header = strings.TrimSpace(header)
+		if header == "" || strings.TrimSpace(out[header]) != "" {
+			continue
+		}
+		if value, ok, err := h.resolveSecret(purpose); err != nil {
+			return nil, err
+		} else if ok {
+			out[header] = value
+		}
+	}
+	return out, nil
+}
+
+func (h cliHost) resolveSecret(purpose string) (string, bool, error) {
+	if h.backend == nil {
+		return "", false, nil
+	}
+	ref := sharedsecret.Plugin(h.plugin, h.instance, sharedsecret.Slot(strings.TrimSpace(purpose)))
+	material, ok, err := h.backend.secretStore.ResolveSecret(context.Background(), ref)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	value := strings.TrimSpace(material.String())
+	if value == "" {
+		return "", false, nil
+	}
+	return value, true, nil
+}
+
+func (h cliHost) storeProcess(record storedProcess) error {
+	st, err := h.backend.readState()
+	if err != nil {
+		return err
+	}
+	if st.Processes == nil {
+		st.Processes = map[string]storedProcess{}
+	}
+	st.Processes[record.ID] = record
+	return h.backend.writeState(st)
+}
+
+func (h cliHost) stopStoredProcess(req sdkhost.ProcessStopRequest) (sdkhost.ProcessStopResponse, error) {
+	if h.backend == nil {
+		return sdkhost.ProcessStopResponse{}, fmt.Errorf("process store is unavailable")
+	}
+	id := strings.TrimSpace(req.ID)
+	st, err := h.backend.readState()
+	if err != nil {
+		return sdkhost.ProcessStopResponse{}, err
+	}
+	record, found := st.Processes[id]
+	pid := req.PID
+	pgid := req.ProcessGroup
+	if found {
+		if pid == 0 {
+			pid = record.PID
+		}
+		if pgid == 0 {
+			pgid = record.ProcessGroup
+		}
+	}
+	signalName := firstNonEmpty(req.Signal, "SIGTERM")
+	sig := processSignal(signalName)
+	resp := sdkhost.ProcessStopResponse{ID: id, Signal: signalName}
+	if pgid != 0 {
+		if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			resp.Error = err.Error()
+			return resp, nil
+		}
+		resp.Stopped = true
+	} else if pid != 0 {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			resp.Error = err.Error()
+			return resp, nil
+		}
+		if err := proc.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			resp.Error = err.Error()
+			return resp, nil
+		}
+		resp.Stopped = true
+	} else {
+		resp.Error = "process id or process group is required"
+		return resp, nil
+	}
+	if found {
+		delete(st.Processes, id)
+		_ = h.backend.writeState(st)
+	}
+	return resp, nil
 }
 
 func decodeHostPayload(payload any, out any) error {
@@ -1393,7 +1894,7 @@ func interfaceFlags(flags net.Flags) []string {
 }
 
 func (b *Backend) readState() (state, error) {
-	st := state{Plugins: map[string]storedPlugin{}, Instances: map[string]storedInstance{}, Endpoints: map[string]storedEndpoint{}}
+	st := state{Plugins: map[string]storedPlugin{}, Instances: map[string]storedInstance{}, Endpoints: map[string]storedEndpoint{}, Processes: map[string]storedProcess{}}
 	data, err := os.ReadFile(b.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
@@ -1415,6 +1916,9 @@ func (b *Backend) readState() (state, error) {
 	}
 	if st.Endpoints == nil {
 		st.Endpoints = map[string]storedEndpoint{}
+	}
+	if st.Processes == nil {
+		st.Processes = map[string]storedProcess{}
 	}
 	return st, nil
 }
@@ -1452,6 +1956,31 @@ func (b *Backend) instance(st state, ref management.Ref, name string) management
 	return management.Instance{Plugin: ref, Name: name, Enabled: true, CreatedAt: now, UpdatedAt: now}
 }
 
+func (b *Backend) manifestForPlugin(ctx context.Context, plugin storedPlugin, instance string) (sdkmanifest.PluginManifest, error) {
+	if len(plugin.Manifest) > 0 {
+		var manifest sdkmanifest.PluginManifest
+		if err := json.Unmarshal(plugin.Manifest, &manifest); err != nil {
+			return sdkmanifest.PluginManifest{}, fmt.Errorf("fluxplane-plugin: decode stored plugin manifest: %w", err)
+		}
+		if strings.TrimSpace(manifest.Name) == "" {
+			manifest.Name = plugin.Ref.Name
+		}
+		return manifest, nil
+	}
+	resp, err := b.invokePlugin(ctx, plugin, normalizeInstance(instance), protocol.CommandManifest, nil)
+	if err != nil {
+		return sdkmanifest.PluginManifest{}, err
+	}
+	manifest, err := protocol.DecodePayload[sdkmanifest.PluginManifest](resp.Result)
+	if err != nil {
+		return sdkmanifest.PluginManifest{}, err
+	}
+	if strings.TrimSpace(manifest.Name) == "" {
+		manifest.Name = plugin.Ref.Name
+	}
+	return manifest, nil
+}
+
 func instanceKey(ref management.Ref, name string) string {
 	return ref.Key() + "#" + normalizeInstance(name)
 }
@@ -1480,6 +2009,245 @@ func authFieldEntries(methods []sdkmanifest.AuthMethod) []authFieldEntry {
 		}
 	}
 	return out
+}
+
+func manifestAuthFields(methods []sdkmanifest.AuthMethod, method string) map[string]sdkmanifest.AuthField {
+	method = authMethodName(method, methods)
+	out := map[string]sdkmanifest.AuthField{}
+	for _, candidate := range methods {
+		if normalizeMethod(candidate.Name) != method {
+			continue
+		}
+		for _, field := range candidate.Fields {
+			name := strings.TrimSpace(field.Name)
+			if name != "" {
+				field.Name = name
+				out[name] = field
+			}
+		}
+		return out
+	}
+	return out
+}
+
+func authMethodName(requested string, methods []sdkmanifest.AuthMethod) string {
+	requested = normalizeMethod(requested)
+	if requested != "default" {
+		return requested
+	}
+	for _, method := range methods {
+		if normalizeMethod(method.Name) == requested {
+			return requested
+		}
+	}
+	for _, method := range methods {
+		if name := normalizeMethod(method.Name); name != "" && name != "default" {
+			return name
+		}
+	}
+	return requested
+}
+
+func (b *Backend) saveAuthSecrets(ctx context.Context, plugin, instance string, values map[string]string, fields map[string]sdkmanifest.AuthField) (map[string]sharedsecret.Ref, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := map[string]sharedsecret.Ref{}
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		ref := sharedsecret.Plugin(plugin, instance, sharedsecret.Slot(key))
+		kind := sharedsecret.KindBearerToken
+		if field, ok := fields[key]; ok && !field.Secret && !field.Sensitive {
+			kind = sharedsecret.KindAPIKey
+		}
+		if err := b.secretStore.SaveSecret(ctx, sharedsecret.StoredSecret{Ref: ref, Kind: kind, Value: value}); err != nil {
+			return nil, err
+		}
+		out[key] = ref
+	}
+	return out, nil
+}
+
+func authStateMetadata(plugin, instance string, values map[string]string, fields map[string]sdkmanifest.AuthField, saved map[string]sharedsecret.Ref) map[string]string {
+	if len(values) == 0 && len(saved) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		ref, ok := saved[key]
+		if !ok {
+			ref = sharedsecret.Plugin(plugin, instance, sharedsecret.Slot(key))
+		}
+		if field, known := fields[key]; known && !field.Secret && !field.Sensitive {
+			out[key] = strings.TrimSpace(value)
+			continue
+		}
+		out[key+"_ref"] = ref.ResourceName()
+	}
+	return out
+}
+
+func authEndpointsFromEnv(manifest sdkmanifest.PluginManifest, plugin, instance string) []management.AuthEndpoint {
+	var out []management.AuthEndpoint
+	for _, spec := range manifest.Endpoints {
+		if value, ok := firstEnvValue(spec.Env); ok {
+			out = append(out, management.AuthEndpoint{
+				Name:    strings.TrimSpace(spec.Name),
+				URL:     value,
+				Product: firstString(spec.Products, plugin),
+			})
+		}
+	}
+	return normalizedAuthEndpoints(out, manifest, plugin, instance)
+}
+
+func normalizedAuthEndpoints(endpoints []management.AuthEndpoint, manifest sdkmanifest.PluginManifest, plugin, instance string) []management.AuthEndpoint {
+	if len(endpoints) == 0 {
+		return nil
+	}
+	byName := endpointSpecByName(manifest.Endpoints)
+	defaultSpec := firstEndpointSpec(manifest.Endpoints)
+	out := make([]management.AuthEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		name := strings.TrimSpace(endpoint.Name)
+		spec, ok := byName[name]
+		if name == "" || !ok {
+			spec = defaultSpec
+			if name == "" {
+				name = strings.TrimSpace(spec.Name)
+			}
+		}
+		product := strings.TrimSpace(endpoint.Product)
+		if product == "" {
+			product = firstString(spec.Products, plugin)
+		}
+		ref := fpendpoint.EndpointRef{
+			ID:      strings.TrimSpace(endpoint.ID),
+			URL:     strings.TrimSpace(endpoint.URL),
+			Product: product,
+			Source:  "auth",
+		}.Normalize()
+		if ref.URL == "" {
+			continue
+		}
+		out = append(out, management.AuthEndpoint{Name: name, ID: ref.ID, URL: ref.URL, Product: ref.Product})
+	}
+	return out
+}
+
+func applyAuthEndpoints(st *state, instance *management.Instance, endpoints []management.AuthEndpoint, now time.Time) error {
+	if len(endpoints) == 0 {
+		return nil
+	}
+	if st.Endpoints == nil {
+		st.Endpoints = map[string]storedEndpoint{}
+	}
+	if instance.Config == nil {
+		instance.Config = map[string]any{}
+	}
+	endpointRefs := configMap(instance.Config["endpoint_refs"])
+	var firstID string
+	for _, endpoint := range endpoints {
+		ref := fpendpoint.EndpointRef{ID: endpoint.ID, URL: endpoint.URL, Product: endpoint.Product, Source: "auth"}.Normalize()
+		if err := ref.Validate(); err != nil {
+			return err
+		}
+		existing, existed := st.Endpoints[ref.ID]
+		record := fpendpoint.Record{EndpointRef: ref, CreatedAt: now, UpdatedAt: now}
+		if existed {
+			record.CreatedAt = existing.Endpoint.CreatedAt
+			if record.CreatedAt.IsZero() {
+				record.CreatedAt = now
+			}
+			record.LastHealth = existing.Endpoint.LastHealth
+		}
+		st.Endpoints[ref.ID] = storedEndpoint{Endpoint: record, UpdatedAt: now}
+		if firstID == "" {
+			firstID = ref.ID
+		}
+		if endpoint.Name != "" {
+			endpointRefs[endpoint.Name] = ref.ID
+		}
+	}
+	if firstID != "" {
+		instance.Config["endpoint_ref"] = firstID
+	}
+	if len(endpointRefs) > 0 {
+		instance.Config["endpoint_refs"] = endpointRefs
+	}
+	return nil
+}
+
+func mergeAuthEndpointMetadata(metadata map[string]string, endpoints []management.AuthEndpoint) map[string]string {
+	if len(endpoints) == 0 {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	for i, endpoint := range endpoints {
+		if endpoint.ID == "" {
+			continue
+		}
+		if i == 0 {
+			metadata["endpoint_ref"] = endpoint.ID
+		}
+		if endpoint.Name != "" {
+			metadata["endpoint_ref."+endpoint.Name] = endpoint.ID
+		}
+	}
+	return metadata
+}
+
+func endpointSpecByName(specs []sdkmanifest.EndpointSpec) map[string]sdkmanifest.EndpointSpec {
+	out := map[string]sdkmanifest.EndpointSpec{}
+	for _, spec := range specs {
+		if name := strings.TrimSpace(spec.Name); name != "" {
+			out[name] = spec
+		}
+	}
+	return out
+}
+
+func firstEndpointSpec(specs []sdkmanifest.EndpointSpec) sdkmanifest.EndpointSpec {
+	for _, spec := range specs {
+		if strings.TrimSpace(spec.Name) != "" || len(spec.Products) > 0 {
+			return spec
+		}
+	}
+	return sdkmanifest.EndpointSpec{}
+}
+
+func firstString(values []string, fallback string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func configMap(value any) map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAnyMap(typed)
+	case map[string]string:
+		out := map[string]any{}
+		for key, value := range typed {
+			out[key] = value
+		}
+		return out
+	default:
+		return map[string]any{}
+	}
 }
 
 func firstEnvValue(keys []string) (string, bool) {
@@ -1516,7 +2284,7 @@ func upsertAuth(instance *management.Instance, auth management.AuthState) bool {
 		if normalizeMethod(instance.Auth[i].Method) != normalizeMethod(auth.Method) {
 			continue
 		}
-		changed := instance.Auth[i].Connected != auth.Connected || !instance.Auth[i].ConnectedAt.Equal(auth.ConnectedAt) || instance.Auth[i].Error != auth.Error
+		changed := instance.Auth[i].Connected != auth.Connected || !instance.Auth[i].ConnectedAt.Equal(auth.ConnectedAt) || instance.Auth[i].Error != auth.Error || !stringMapEqual(instance.Auth[i].Metadata, auth.Metadata)
 		instance.Auth[i] = auth
 		return changed
 	}
@@ -1555,6 +2323,109 @@ func sortAuth(auth []management.AuthState) {
 	sort.Slice(auth, func(i, j int) bool { return normalizeMethod(auth[i].Method) < normalizeMethod(auth[j].Method) })
 }
 
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func validatedProcessCommand(command string) (string, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", fmt.Errorf("host process command is required")
+	}
+	if strings.ContainsAny(command, "\n\r;&|<>$`") {
+		return "", fmt.Errorf("host process command must be an executable name or path, not shell syntax")
+	}
+	return command, nil
+}
+
+func processID(command string) string {
+	base := strings.TrimSpace(filepath.Base(command))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "process"
+	}
+	return base + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
+
+func processSignal(name string) syscall.Signal {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "SIGKILL", "KILL":
+		return syscall.SIGKILL
+	case "SIGINT", "INT":
+		return syscall.SIGINT
+	default:
+		return syscall.SIGTERM
+	}
+}
+
+func waitForLogMarker(path, marker string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		data, _ := os.ReadFile(path)
+		if strings.Contains(string(data), marker) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process did not report readiness marker %q", marker)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+type limitedBuffer struct {
+	buf       bytes.Buffer
+	limit     int64
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.limit <= 0 {
+		_, _ = b.buf.Write(p)
+		return len(p), nil
+	}
+	remaining := b.limit - int64(b.buf.Len())
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if int64(len(p)) > remaining {
+		_, _ = b.buf.Write(p[:int(remaining)])
+		b.truncated = true
+		return len(p), nil
+	}
+	_, _ = b.buf.Write(p)
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
+func (b *limitedBuffer) Truncated() bool {
+	return b.truncated
+}
+
 func isEmptyRuntime(runtime management.RuntimeSpec) bool {
 	return strings.TrimSpace(runtime.Kind) == "" && strings.TrimSpace(runtime.Command) == "" && len(runtime.Args) == 0 && strings.TrimSpace(runtime.Path) == ""
 }
@@ -1564,6 +2435,17 @@ func copyRaw(raw json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), raw...)
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func jsonPretty(raw json.RawMessage) ([]byte, error) {

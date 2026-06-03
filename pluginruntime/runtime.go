@@ -39,6 +39,7 @@ type Host struct {
 
 type InvokeConfig struct {
 	Instance string
+	Config   map[string]any
 	Grant    string
 	Host     protocol.HostCaller
 }
@@ -107,6 +108,7 @@ func (h *Host) Invoke(ctx context.Context, pluginName, command string, payload a
 		}
 	}
 	req.Instance = strings.TrimSpace(cfg.Instance)
+	req.Config = cloneConfig(cfg.Config)
 	req.Grant = strings.TrimSpace(cfg.Grant)
 	return plugin.Invoke(ctx, req, cfg.Host)
 }
@@ -143,6 +145,12 @@ func (h *Host) plugin(name string) (Plugin, error) {
 func WithInstance(instance string) InvokeOption {
 	return func(cfg *InvokeConfig) {
 		cfg.Instance = instance
+	}
+}
+
+func WithConfig(config map[string]any) InvokeOption {
+	return func(cfg *InvokeConfig) {
+		cfg.Config = cloneConfig(config)
 	}
 }
 
@@ -413,6 +421,17 @@ func normalizeRequest(req protocol.Request, plugin, version string) protocol.Req
 		req.Plugin = strings.TrimSpace(plugin)
 	}
 	return req
+}
+
+func cloneConfig(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func responseError(resp protocol.Response) error {

@@ -46,6 +46,8 @@ const (
 	HostCapabilityBlobInfo     = "host.capability.blob.info"
 	HostCapabilityEnvLookup    = "host.capability.env.lookup"
 	HostCapabilityProcessRun   = "host.capability.process.run"
+	HostCapabilityProcessStart = "host.capability.process.start"
+	HostCapabilityProcessStop  = "host.capability.process.stop"
 	HostCapabilityProviderCall = "host.capability.provider.call"
 )
 
@@ -54,6 +56,7 @@ type Request struct {
 	Command  string          `json:"command"`
 	Plugin   string          `json:"plugin,omitempty"`
 	Instance string          `json:"instance,omitempty"`
+	Config   map[string]any  `json:"config,omitempty"`
 	Grant    string          `json:"secret_grant,omitempty"`
 	Payload  json.RawMessage `json:"payload,omitempty"`
 }

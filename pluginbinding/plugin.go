@@ -29,6 +29,7 @@ type Context struct {
 	stdcontext.Context
 	Request protocol.Request
 	Call    protocol.OperationCall
+	Config  map[string]any
 	Cache   *Cache
 	Host    HostClient
 	Events  EventSink
@@ -280,7 +281,7 @@ func (p *Plugin) HandleWithContextHostAndEvents(ctx stdcontext.Context, req prot
 		events = unavailableEventSink{}
 	}
 	cache := NewCache()
-	bindingCtx := Context{Context: ctx, Request: req, Cache: cache, Host: host, Events: events, plugin: p}
+	bindingCtx := Context{Context: ctx, Request: req, Config: cloneConfig(req.Config), Cache: cache, Host: host, Events: events, plugin: p}
 	if handler := p.commandHandlers[req.Command]; handler != nil {
 		return handler(bindingCtx)
 	}
@@ -329,6 +330,17 @@ func (p *Plugin) Manifest() manifest.PluginManifest {
 	return manifest
 }
 
+func cloneConfig(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func (p *Plugin) callBatch(ctx stdcontext.Context, req protocol.Request, cache *Cache, host HostClient, events EventSink) protocol.Response {
 	batch, err := protocol.DecodePayload[protocol.OperationBatch](req.Payload)
 	if err != nil {
@@ -375,7 +387,7 @@ func (p *Plugin) runOperation(ctx stdcontext.Context, req protocol.Request, call
 	if ctx == nil {
 		ctx = stdcontext.Background()
 	}
-	return op.Run(Context{Context: ctx, Request: req, Call: call, Cache: cache, Host: host, Events: events, plugin: p})
+	return op.Run(Context{Context: ctx, Request: req, Call: call, Config: cloneConfig(req.Config), Cache: cache, Host: host, Events: events, plugin: p})
 }
 
 func (p *Plugin) RunOperation(req protocol.Request, call protocol.OperationCall, cache *Cache) protocol.OperationResult {
@@ -451,7 +463,7 @@ func (p *Plugin) runContext(ctx Context) protocol.Response {
 	}
 	var out ContextBuildResult
 	for _, provider := range p.contextProviders {
-		resp := provider.Run(Context{Context: ctx.Context, Request: ctx.Request, Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p})
+		resp := provider.Run(Context{Context: ctx.Context, Request: ctx.Request, Config: cloneConfig(ctx.Request.Config), Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p})
 		if !resp.OK {
 			return resp
 		}
@@ -481,7 +493,7 @@ func (p *Plugin) runEvidence(ctx Context) protocol.Response {
 		if spec.Phase != "" && input.Phase != "" && spec.Phase != input.Phase {
 			continue
 		}
-		result, err := observer.Observe(Context{Context: ctx.Context, Request: ctx.Request, Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p}, input)
+		result, err := observer.Observe(Context{Context: ctx.Context, Request: ctx.Request, Config: cloneConfig(ctx.Request.Config), Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p}, input)
 		if err != nil {
 			var pluginErr Error
 			if errors.As(err, &pluginErr) {

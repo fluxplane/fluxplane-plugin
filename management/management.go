@@ -198,6 +198,14 @@ type AuthState struct {
 	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
+// AuthEndpoint records an endpoint configured during plugin auth setup.
+type AuthEndpoint struct {
+	Name    string `json:"name,omitempty"`
+	ID      string `json:"id,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Product string `json:"product,omitempty"`
+}
+
 // AuthStatusRequest requests auth state for a plugin instance.
 type AuthStatusRequest struct {
 	Ref      Ref    `json:"ref"`
@@ -223,11 +231,12 @@ type AuthMethodsResult struct {
 
 // AuthConnectRequest records a connected auth method for a plugin instance.
 type AuthConnectRequest struct {
-	Ref      Ref               `json:"ref"`
-	Instance string            `json:"instance,omitempty"`
-	Method   string            `json:"method,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
-	DryRun   bool              `json:"dry_run,omitempty"`
+	Ref       Ref               `json:"ref"`
+	Instance  string            `json:"instance,omitempty"`
+	Method    string            `json:"method,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	Endpoints []AuthEndpoint    `json:"endpoints,omitempty"`
+	DryRun    bool              `json:"dry_run,omitempty"`
 }
 
 // AuthAutoRequest connects auth by importing manifest-declared environment variables.
@@ -239,13 +248,14 @@ type AuthAutoRequest struct {
 
 // AuthAutoResult describes an environment import outcome.
 type AuthAutoResult struct {
-	Plugin   Ref      `json:"plugin"`
-	Instance string   `json:"instance"`
-	Saved    []string `json:"saved,omitempty"`
-	Missing  []string `json:"missing,omitempty"`
-	Skipped  []string `json:"skipped,omitempty"`
-	Changed  bool     `json:"changed"`
-	Message  string   `json:"message,omitempty"`
+	Plugin    Ref            `json:"plugin"`
+	Instance  string         `json:"instance"`
+	Saved     []string       `json:"saved,omitempty"`
+	Endpoints []AuthEndpoint `json:"endpoints,omitempty"`
+	Missing   []string       `json:"missing,omitempty"`
+	Skipped   []string       `json:"skipped,omitempty"`
+	Changed   bool           `json:"changed"`
+	Message   string         `json:"message,omitempty"`
 }
 
 // AuthTestRequest records the result of testing auth for a plugin instance.

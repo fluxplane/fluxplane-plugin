@@ -32,6 +32,8 @@ type Client interface {
 	BlobInfo(input BlobInfoRequest) (BlobRef, error)
 	EnvLookup(key string) (EnvLookupResponse, error)
 	ProcessRun(input ProcessRunRequest) (ProcessRunResponse, error)
+	ProcessStart(input ProcessStartRequest) (ProcessStartResponse, error)
+	ProcessStop(input ProcessStopRequest) (ProcessStopResponse, error)
 	CapabilityCall(input ProviderCallRequest) (ProviderCallResponse, error)
 }
 
@@ -118,6 +120,18 @@ func (h client) ProcessRun(input ProcessRunRequest) (ProcessRunResponse, error) 
 	return out, err
 }
 
+func (h client) ProcessStart(input ProcessStartRequest) (ProcessStartResponse, error) {
+	var out ProcessStartResponse
+	err := h.call(protocol.HostCapabilityProcessStart, input, &out)
+	return out, err
+}
+
+func (h client) ProcessStop(input ProcessStopRequest) (ProcessStopResponse, error) {
+	var out ProcessStopResponse
+	err := h.call(protocol.HostCapabilityProcessStop, input, &out)
+	return out, err
+}
+
 func (h client) CapabilityCall(input ProviderCallRequest) (ProviderCallResponse, error) {
 	var out ProviderCallResponse
 	err := h.call(protocol.HostCapabilityProviderCall, input, &out)
@@ -177,6 +191,14 @@ func (unavailableClient) EnvLookup(string) (EnvLookupResponse, error) {
 
 func (unavailableClient) ProcessRun(ProcessRunRequest) (ProcessRunResponse, error) {
 	return ProcessRunResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ProcessStart(ProcessStartRequest) (ProcessStartResponse, error) {
+	return ProcessStartResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ProcessStop(ProcessStopRequest) (ProcessStopResponse, error) {
+	return ProcessStopResponse{}, fmt.Errorf("host client is unavailable")
 }
 
 func (unavailableClient) CapabilityCall(ProviderCallRequest) (ProviderCallResponse, error) {

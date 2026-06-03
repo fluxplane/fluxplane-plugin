@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -160,6 +161,143 @@ func parseMetadata(values []string) (map[string]string, error) {
 		out[key] = strings.TrimSpace(val)
 	}
 	return out, nil
+}
+
+func parseAuthEndpoints(values []string, urlValue, id, product string) ([]management.AuthEndpoint, error) {
+	var out []management.AuthEndpoint
+	if strings.TrimSpace(urlValue) != "" {
+		out = append(out, management.AuthEndpoint{ID: strings.TrimSpace(id), URL: strings.TrimSpace(urlValue), Product: strings.TrimSpace(product)})
+	}
+	for _, value := range values {
+		name, endpointURL, ok := strings.Cut(value, "=")
+		if !ok {
+			endpointURL = name
+			name = ""
+		}
+		endpointURL = strings.TrimSpace(endpointURL)
+		if endpointURL == "" {
+			return nil, fmt.Errorf("fluxplane-plugin: endpoint value %q must include a URL", value)
+		}
+		out = append(out, management.AuthEndpoint{Name: strings.TrimSpace(name), URL: endpointURL, Product: strings.TrimSpace(product)})
+	}
+	return out, nil
+}
+
+func promptAuthConnect(cmd *cobra.Command, backend management.Backend, ref management.Ref, instance, method string, metadata map[string]string, endpoints []management.AuthEndpoint) (map[string]string, []management.AuthEndpoint, string, error) {
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	reader := bufio.NewReader(cmd.InOrStdin())
+	methods, err := backend.AuthMethods(cmd.Context(), management.AuthMethodsRequest{Ref: ref, Instance: instance})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	selected := selectAuthMethod(method, methods.Methods)
+	for _, authMethod := range methods.Methods {
+		if strings.TrimSpace(authMethod.Name) != selected {
+			continue
+		}
+		for _, field := range authMethod.Fields {
+			name := strings.TrimSpace(field.Name)
+			if name == "" || strings.TrimSpace(metadata[name]) != "" {
+				continue
+			}
+			defaultValue, _ := firstValueFromEnv(field.Env)
+			value, err := promptValue(cmd, reader, name, defaultValue)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if strings.TrimSpace(value) != "" {
+				metadata[name] = strings.TrimSpace(value)
+			}
+		}
+		break
+	}
+	manifest, err := backend.PluginManifest(cmd.Context(), management.ManifestRequest{Ref: ref})
+	if err != nil {
+		return nil, nil, "", err
+	}
+	var decoded sdkmanifest.PluginManifest
+	if len(manifest.Manifest) > 0 {
+		if err := json.Unmarshal(manifest.Manifest, &decoded); err != nil {
+			return nil, nil, "", err
+		}
+	}
+	configured := map[string]bool{}
+	for _, endpoint := range endpoints {
+		if strings.TrimSpace(endpoint.Name) != "" {
+			configured[strings.TrimSpace(endpoint.Name)] = true
+		}
+	}
+	for _, spec := range decoded.Endpoints {
+		name := strings.TrimSpace(spec.Name)
+		if configured[name] {
+			continue
+		}
+		defaultValue, _ := firstValueFromEnv(spec.Env)
+		value, err := promptValue(cmd, reader, firstNonEmpty(name, "endpoint_url"), defaultValue)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		if strings.TrimSpace(value) != "" {
+			endpoints = append(endpoints, management.AuthEndpoint{Name: name, URL: strings.TrimSpace(value), Product: firstString(spec.Products)})
+		}
+	}
+	return metadata, endpoints, selected, nil
+}
+
+func promptValue(cmd *cobra.Command, reader *bufio.Reader, label, defaultValue string) (string, error) {
+	if strings.TrimSpace(defaultValue) != "" {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s [%s]: ", label, defaultValue); err != nil {
+			return "", err
+		}
+	} else if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s: ", label); err != nil {
+		return "", err
+	}
+	value, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultValue, nil
+	}
+	return value, nil
+}
+
+func firstValueFromEnv(keys []string) (string, bool) {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(strings.TrimSpace(key))); value != "" {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func selectAuthMethod(requested string, methods []sdkmanifest.AuthMethod) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return requested
+	}
+	for _, method := range methods {
+		if name := strings.TrimSpace(method.Name); name != "" {
+			return name
+		}
+	}
+	return "default"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstString(values []string) string {
+	return firstNonEmpty(values...)
 }
 
 func mergeStringMaps(base, override map[string]string) map[string]string {
@@ -489,6 +627,12 @@ func newAuthConnectCommand(backend management.Backend) *cobra.Command {
 	var instance string
 	var method string
 	var metadataValues []string
+	var endpointValues []string
+	var endpointURL string
+	var endpointID string
+	var endpointProduct string
+	var auto bool
+	var interactive bool
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "connect PLUGIN[@VERSION]",
@@ -498,11 +642,29 @@ func newAuthConnectCommand(backend management.Backend) *cobra.Command {
 			if err := backendRequired(backend); err != nil {
 				return err
 			}
+			ref := parseRef(args[0])
+			if auto {
+				result, err := backend.AuthAuto(cmd.Context(), management.AuthAutoRequest{Ref: ref, Instance: instance, DryRun: dryRun})
+				if err != nil {
+					return err
+				}
+				return printJSON(cmd.OutOrStdout(), result)
+			}
 			metadata, err := parseMetadata(metadataValues)
 			if err != nil {
 				return err
 			}
-			result, err := backend.AuthConnect(cmd.Context(), management.AuthConnectRequest{Ref: parseRef(args[0]), Instance: instance, Method: method, Metadata: metadata, DryRun: dryRun})
+			endpoints, err := parseAuthEndpoints(endpointValues, endpointURL, endpointID, endpointProduct)
+			if err != nil {
+				return err
+			}
+			if interactive {
+				metadata, endpoints, method, err = promptAuthConnect(cmd, backend, ref, instance, method, metadata, endpoints)
+				if err != nil {
+					return err
+				}
+			}
+			result, err := backend.AuthConnect(cmd.Context(), management.AuthConnectRequest{Ref: ref, Instance: instance, Method: method, Metadata: metadata, Endpoints: endpoints, DryRun: dryRun})
 			if err != nil {
 				return err
 			}
@@ -510,8 +672,14 @@ func newAuthConnectCommand(backend management.Backend) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
-	cmd.Flags().StringVar(&method, "method", "default", "auth method")
+	cmd.Flags().StringVar(&method, "method", "", "auth method")
 	cmd.Flags().StringArrayVar(&metadataValues, "field", nil, "auth field as key=value")
+	cmd.Flags().StringArrayVar(&endpointValues, "endpoint", nil, "endpoint as name=url or url")
+	cmd.Flags().StringVar(&endpointURL, "endpoint-url", "", "endpoint URL")
+	cmd.Flags().StringVar(&endpointID, "endpoint-id", "", "endpoint ID")
+	cmd.Flags().StringVar(&endpointProduct, "endpoint-product", "", "endpoint product")
+	cmd.Flags().BoolVar(&auto, "auto", false, "connect from manifest-declared environment variables")
+	cmd.Flags().BoolVar(&interactive, "interactive", false, "prompt for manifest-declared setup values")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
 	cmd.AddCommand(newAuthAutoCommand(backend))
 	return cmd

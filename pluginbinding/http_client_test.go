@@ -137,6 +137,14 @@ func (h *hostHTTPClientTestHost) ProcessRun(ProcessRunRequest) (ProcessRunRespon
 	return ProcessRunResponse{}, nil
 }
 
+func (h *hostHTTPClientTestHost) ProcessStart(ProcessStartRequest) (ProcessStartResponse, error) {
+	return ProcessStartResponse{}, nil
+}
+
+func (h *hostHTTPClientTestHost) ProcessStop(ProcessStopRequest) (ProcessStopResponse, error) {
+	return ProcessStopResponse{}, nil
+}
+
 func (h *hostHTTPClientTestHost) CapabilityCall(ProviderCallRequest) (ProviderCallResponse, error) {
 	return ProviderCallResponse{}, nil
 }

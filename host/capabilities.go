@@ -1,7 +1,10 @@
 // Package host exposes plugin SDK host-capability contracts.
 package host
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	CapabilityHTTP      = "http"
@@ -117,6 +120,46 @@ type ProcessRunResponse struct {
 	Stderr          string   `json:"stderr,omitempty"`
 	StdoutTruncated bool     `json:"stdout_truncated,omitempty"`
 	StderrTruncated bool     `json:"stderr_truncated,omitempty"`
+}
+
+type ProcessStartRequest struct {
+	ID        string            `json:"id,omitempty"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	Workdir   string            `json:"workdir,omitempty"`
+	Env       []string          `json:"env,omitempty"`
+	Label     string            `json:"label,omitempty"`
+	Group     string            `json:"group,omitempty"`
+	Tags      []string          `json:"tags,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	LogPath   string            `json:"log_path,omitempty"`
+	StartedOK string            `json:"started_ok,omitempty"`
+	TimeoutMS int               `json:"timeout_ms,omitempty"`
+}
+
+type ProcessStartResponse struct {
+	ID           string    `json:"id"`
+	Command      string    `json:"command"`
+	Args         []string  `json:"args,omitempty"`
+	Workdir      string    `json:"workdir,omitempty"`
+	PID          int       `json:"pid,omitempty"`
+	ProcessGroup int       `json:"process_group,omitempty"`
+	LogPath      string    `json:"log_path,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+}
+
+type ProcessStopRequest struct {
+	ID           string `json:"id,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	ProcessGroup int    `json:"process_group,omitempty"`
+	Signal       string `json:"signal,omitempty"`
+}
+
+type ProcessStopResponse struct {
+	ID      string `json:"id,omitempty"`
+	Stopped bool   `json:"stopped"`
+	Signal  string `json:"signal,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type ProviderCallRequest struct {
