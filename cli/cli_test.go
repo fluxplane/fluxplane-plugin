@@ -7,8 +7,10 @@ import (
 	"net"
 	"testing"
 
+	fpcontext "github.com/fluxplane/fluxplane-context"
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	"github.com/fluxplane/fluxplane-plugin/management"
+	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 )
 
 type fakeBackend struct {
@@ -44,7 +46,7 @@ func (f *fakeBackend) UpdatePlugin(_ context.Context, req management.UpdateReque
 }
 
 func (f *fakeBackend) ListPlugins(context.Context, management.ListRequest) ([]management.Plugin, error) {
-	return []management.Plugin{{Ref: management.Ref{Name: "gitlab"}, Installed: true}}, nil
+	return []management.Plugin{{Ref: management.Ref{Name: "gitlab"}, Installed: true, Enabled: true}}, nil
 }
 
 func (f *fakeBackend) PluginStatus(context.Context, management.StatusRequest) (management.StatusResult, error) {
@@ -113,7 +115,11 @@ func (f *fakeBackend) BatchOperations(_ context.Context, req management.Operatio
 }
 
 func (f *fakeBackend) ListDatasources(_ context.Context, req management.DatasourceListRequest) (management.DatasourceListResult, error) {
-	return management.DatasourceListResult{Plugin: req.Ref, Instance: req.Instance}, nil
+	return management.DatasourceListResult{Plugin: req.Ref, Instance: req.Instance, Datasources: []sdkmanifest.DatasourceSpec{{
+		Name:         req.Ref.Name + ".items",
+		Entity:       req.Ref.Name + ".item",
+		Capabilities: []string{"search", "lookup", "get", "list", "batch_get"},
+	}}}, nil
 }
 
 func (f *fakeBackend) CallDatasource(_ context.Context, req management.DatasourceCallRequest) (management.DatasourceCallResult, error) {
@@ -122,7 +128,7 @@ func (f *fakeBackend) CallDatasource(_ context.Context, req management.Datasourc
 }
 
 func (f *fakeBackend) ListContextProviders(_ context.Context, req management.ContextListRequest) (management.ContextListResult, error) {
-	return management.ContextListResult{Plugin: req.Ref, Instance: req.Instance}, nil
+	return management.ContextListResult{Plugin: req.Ref, Instance: req.Instance, Context: []sdkmanifest.ContextSpec{{Name: fpcontext.ProviderName(req.Ref.Name + ".context")}}}, nil
 }
 
 func (f *fakeBackend) BuildContext(_ context.Context, req management.ContextBuildRequest) (management.ContextBuildResult, error) {
@@ -329,6 +335,53 @@ func TestDatasourceBatchGetCommandUsesBackend(t *testing.T) {
 	}
 }
 
+func TestDatasourceFanoutCommandsUseCapablePlugins(t *testing.T) {
+	t.Run("search all", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"datasource", "search-all", "incident", "--instance", "work", "--entity", "gitlab.issue", "--limit", "3"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.datasource.Ref.Name != "gitlab" || backend.datasource.Instance != "work" || backend.datasource.Capability != "search" {
+			t.Fatalf("datasource search-all request = %#v", backend.datasource)
+		}
+		var input map[string]any
+		if err := json.Unmarshal(backend.datasource.Input, &input); err != nil {
+			t.Fatalf("search-all input JSON: %v", err)
+		}
+		if input["query"] != "incident" || input["entity"] != "gitlab.issue" || input["limit"].(float64) != 3 {
+			t.Fatalf("search-all input = %#v", input)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("lookup", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"lookup", "group/project", "--instance", "work", "--entity", "gitlab.project", "--limit", "2"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.datasource.Ref.Name != "gitlab" || backend.datasource.Instance != "work" || backend.datasource.Capability != "lookup" {
+			t.Fatalf("lookup request = %#v", backend.datasource)
+		}
+		var input map[string]any
+		if err := json.Unmarshal(backend.datasource.Input, &input); err != nil {
+			t.Fatalf("lookup input JSON: %v", err)
+		}
+		if input["text"] != "group/project" || input["entity"] != "gitlab.project" || input["limit"].(float64) != 2 {
+			t.Fatalf("lookup input = %#v", input)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+}
+
 func TestContextBuildCommandUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
 	var out bytes.Buffer
@@ -342,6 +395,25 @@ func TestContextBuildCommandUsesBackend(t *testing.T) {
 	}
 	if len(backend.built.Kinds) != 1 || backend.built.Kinds[0] != "data" {
 		t.Fatalf("context build kinds = %#v", backend.built.Kinds)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestContextBuildAllCommandUsesContextPlugins(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"context", "build-all", "release notes", "--instance", "work", "--kind", "text", "--limit", "4"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.built.Ref.Name != "gitlab" || backend.built.Instance != "work" || backend.built.Query != "release notes" || backend.built.Limit != 4 {
+		t.Fatalf("context build-all request = %#v", backend.built)
+	}
+	if len(backend.built.Kinds) != 1 || backend.built.Kinds[0] != "text" {
+		t.Fatalf("context build-all kinds = %#v", backend.built.Kinds)
 	}
 	if out.Len() == 0 {
 		t.Fatalf("expected JSON output")

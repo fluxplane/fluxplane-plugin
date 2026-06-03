@@ -57,6 +57,7 @@ func New(opts Options) *cobra.Command {
 		newAuthCommand(opts.Backend),
 		newOperationCommand(opts.Backend),
 		newDatasourceCommand(opts.Backend),
+		newLookupCommand(opts.Backend),
 		newContextCommand(opts.Backend),
 		newIndexCommand(opts.Backend),
 		newEndpointCommand(opts.Backend),
@@ -134,6 +135,13 @@ func readJSONPayload(input, path string) (json.RawMessage, error) {
 		return nil, errors.New("fluxplane-plugin: input must be valid JSON")
 	}
 	return append(json.RawMessage(nil), raw...), nil
+}
+
+func copyRaw(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
 }
 
 func parseMetadata(values []string) (map[string]string, error) {
@@ -739,9 +747,11 @@ func newDatasourceCommand(backend management.Backend) *cobra.Command {
 		newDatasourceListCommand(backend),
 		newDatasourceRecordsCommand(backend),
 		newDatasourceCallCommand(backend, "search"),
+		newDatasourceSearchAllCommand(backend),
 		newDatasourceCallCommand(backend, "get"),
 		newDatasourceBatchGetCommand(backend),
 		newDatasourceCallCommand(backend, "lookup"),
+		newDatasourceLookupAllCommand(backend),
 	)
 	return cmd
 }
@@ -812,6 +822,66 @@ func newDatasourceCallCommand(backend management.Backend, capability string) *co
 	return cmd
 }
 
+func newDatasourceSearchAllCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var entity string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "search-all QUERY",
+		Short: "Search all installed datasource plugins",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			query := strings.Join(args, " ")
+			result, err := fanoutDatasource(cmd.Context(), backend, "search", instance, map[string]any{"query": query, "entity": entity, "limit": limit})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), map[string]any{"query": query, "results": result})
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&entity, "entity", "", "entity type filter")
+	cmd.Flags().IntVar(&limit, "limit", 20, "maximum records per plugin")
+	return cmd
+}
+
+func newDatasourceLookupAllCommand(backend management.Backend) *cobra.Command {
+	return newLookupCommandWithUse(backend, "lookup-all TEXT", "Lookup across all installed datasource plugins")
+}
+
+func newLookupCommand(backend management.Backend) *cobra.Command {
+	return newLookupCommandWithUse(backend, "lookup TEXT", "Lookup canonical datasource references")
+}
+
+func newLookupCommandWithUse(backend management.Backend, use, short string) *cobra.Command {
+	var instance string
+	var entity string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: short,
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			text := strings.Join(args, " ")
+			result, err := fanoutDatasource(cmd.Context(), backend, "lookup", instance, map[string]any{"text": text, "entity": entity, "limit": limit})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), map[string]any{"text": text, "results": result})
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&entity, "entity", "", "entity type filter")
+	cmd.Flags().IntVar(&limit, "limit", 20, "maximum matches per plugin")
+	return cmd
+}
+
 func newContextCommand(backend management.Backend) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "context",
@@ -821,6 +891,7 @@ func newContextCommand(backend management.Backend) *cobra.Command {
 	cmd.AddCommand(
 		newContextListCommand(backend),
 		newContextBuildCommand(backend),
+		newContextBuildAllCommand(backend),
 	)
 	return cmd
 }
@@ -880,6 +951,134 @@ func newContextBuildCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().StringVar(&input, "input", "", "context build input JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "context build input JSON file")
 	return cmd
+}
+
+func newContextBuildAllCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var kinds []string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "build-all QUERY",
+		Short: "Build context from all installed context plugins",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			query := strings.Join(args, " ")
+			result, err := fanoutContext(cmd.Context(), backend, instance, query, kinds, limit)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), map[string]any{"query": query, "results": result})
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringArrayVar(&kinds, "kind", nil, "context block kind filter")
+	cmd.Flags().IntVar(&limit, "limit", 20, "maximum context blocks per plugin")
+	return cmd
+}
+
+type fanoutCallResult struct {
+	Plugin   management.Ref  `json:"plugin"`
+	Instance string          `json:"instance,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+	Error    string          `json:"error,omitempty"`
+}
+
+func fanoutDatasource(ctx context.Context, backend management.Backend, capability, instance string, payload map[string]any) ([]fanoutCallResult, error) {
+	plugins, err := datasourceCapablePlugins(ctx, backend, instance, capability)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fanoutCallResult, 0, len(plugins))
+	for _, plugin := range plugins {
+		call, err := backend.CallDatasource(ctx, management.DatasourceCallRequest{Ref: plugin.Ref, Instance: instance, Capability: capability, Input: raw})
+		result := fanoutCallResult{Plugin: plugin.Ref, Instance: instance}
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Result = copyRaw(call.Result)
+		}
+		out = append(out, result)
+	}
+	return out, nil
+}
+
+func datasourceCapablePlugins(ctx context.Context, backend management.Backend, instance, capability string) ([]management.Plugin, error) {
+	plugins, err := backend.ListPlugins(ctx, management.ListRequest{All: true})
+	if err != nil {
+		return nil, err
+	}
+	var out []management.Plugin
+	for _, plugin := range plugins {
+		if !plugin.Installed || !plugin.Enabled {
+			continue
+		}
+		listed, err := backend.ListDatasources(ctx, management.DatasourceListRequest{Ref: plugin.Ref, Instance: instance})
+		if err != nil {
+			continue
+		}
+		for _, datasource := range listed.Datasources {
+			if hasCapability(datasource.Capabilities, capability) {
+				out = append(out, plugin)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func fanoutContext(ctx context.Context, backend management.Backend, instance, query string, kinds []string, limit int) ([]fanoutCallResult, error) {
+	plugins, err := contextCapablePlugins(ctx, backend, instance)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fanoutCallResult, 0, len(plugins))
+	for _, plugin := range plugins {
+		call, err := backend.BuildContext(ctx, management.ContextBuildRequest{Ref: plugin.Ref, Instance: instance, Query: query, Kinds: kinds, Limit: limit})
+		result := fanoutCallResult{Plugin: plugin.Ref, Instance: instance}
+		if err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Result = copyRaw(call.Result)
+		}
+		out = append(out, result)
+	}
+	return out, nil
+}
+
+func contextCapablePlugins(ctx context.Context, backend management.Backend, instance string) ([]management.Plugin, error) {
+	plugins, err := backend.ListPlugins(ctx, management.ListRequest{All: true})
+	if err != nil {
+		return nil, err
+	}
+	var out []management.Plugin
+	for _, plugin := range plugins {
+		if !plugin.Installed || !plugin.Enabled {
+			continue
+		}
+		listed, err := backend.ListContextProviders(ctx, management.ContextListRequest{Ref: plugin.Ref, Instance: instance})
+		if err != nil || len(listed.Context) == 0 {
+			continue
+		}
+		out = append(out, plugin)
+	}
+	return out, nil
+}
+
+func hasCapability(capabilities []string, capability string) bool {
+	capability = strings.TrimSpace(capability)
+	for _, candidate := range capabilities {
+		if strings.TrimSpace(candidate) == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func newIndexCommand(backend management.Backend) *cobra.Command {
