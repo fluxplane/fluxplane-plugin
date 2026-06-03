@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	ManifestProtocolKey = "dex.protocol"
+	ManifestProtocolKey = "fluxplane.plugin.protocol"
 	SecretGetCommand    = "host.secret.get"
 	IndexLookupCommand  = "host.index.lookup"
 	IndexSearchCommand  = "host.index.search"

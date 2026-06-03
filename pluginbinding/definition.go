@@ -48,7 +48,7 @@ func WithHostManagedAuthTest(product string) PluginOption {
 			if label == "" {
 				label = name
 			}
-			return OKText(label+" auth is host-managed; use dex auth status "+name, map[string]any{"status": "host_managed"})
+			return OKText(label+" auth is host-managed; use fluxplane-plugin auth status "+name, map[string]any{"status": "host_managed"})
 		})
 	}
 }
@@ -161,7 +161,7 @@ func authConnectText(manifest manifest.PluginManifest) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	parts := []string{"Use dex auth connect", manifest.Name}
+	parts := []string{"Use fluxplane-plugin auth connect", manifest.Name}
 	for _, field := range fields {
 		parts = append(parts, "--field", field+"=<value>")
 	}

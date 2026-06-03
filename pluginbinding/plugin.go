@@ -209,7 +209,7 @@ func (p *Plugin) HostOwnedIndexStatus(product string) {
 func (p *Plugin) AuthTestOperation(name string) {
 	p.Command(protocol.CommandAuthTest, func(ctx Context) protocol.Response {
 		if ctx.Request.Grant == "" {
-			return OKText(p.manifest.Name+" auth is host-managed; use dex auth status "+p.manifest.Name+" or dex op run "+name, map[string]any{"status": "host_managed"})
+			return OKText(p.manifest.Name+" auth is host-managed; use fluxplane-plugin auth status "+p.manifest.Name+" or fluxplane-plugin operation invoke "+p.manifest.Name+" "+name, map[string]any{"status": "host_managed"})
 		}
 		return p.callOperation(ctx.Context, ctx.Request, protocol.OperationCall{Name: name}, NewCache(), ctx.Host, ctx.Events, true)
 	})
@@ -218,7 +218,7 @@ func (p *Plugin) AuthTestOperation(name string) {
 func (p *Plugin) IndexBuildOperation(name string) {
 	p.Command(protocol.CommandIndexBuild, func(ctx Context) protocol.Response {
 		if ctx.Request.Grant == "" {
-			return OKText("Use dex op run "+name+" to build live records", map[string]any{"status": "requires_operation_grant"})
+			return OKText("Use fluxplane-plugin operation invoke "+p.manifest.Name+" "+name+" to build live records", map[string]any{"status": "requires_operation_grant"})
 		}
 		return p.callOperation(ctx.Context, ctx.Request, protocol.OperationCall{Name: name, Input: ctx.Request.Payload}, NewCache(), ctx.Host, ctx.Events, false)
 	})

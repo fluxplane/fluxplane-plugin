@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	Version   = "dex.plugin.v2"
-	VersionV1 = "dex.plugin.v1"
+	Version   = "fluxplane.plugin.v2"
+	VersionV1 = "fluxplane.plugin.v1"
 )
 
 const (
