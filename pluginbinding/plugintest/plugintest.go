@@ -197,7 +197,7 @@ func AssertManifestQuality(t *testing.T, manifest manifest.PluginManifest) {
 		liveCapability := false
 		for _, capability := range datasource.Capabilities {
 			switch capability {
-			case pluginbinding.CapabilitySearch, pluginbinding.CapabilityList, pluginbinding.CapabilityLookup, pluginbinding.CapabilityGet:
+			case pluginbinding.CapabilitySearch, pluginbinding.CapabilityList, pluginbinding.CapabilityLookup, pluginbinding.CapabilityGet, pluginbinding.CapabilityBatchGet:
 				liveCapability = true
 			}
 		}

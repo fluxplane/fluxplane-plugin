@@ -58,6 +58,30 @@ func TestClientHTTPUsesProtocolCapabilityCommand(t *testing.T) {
 	}
 }
 
+func TestClientProcessRunUsesProtocolCapabilityCommand(t *testing.T) {
+	var seenCommand string
+	var seenInput any
+	client := NewClient(callerFunc(func(command string, input any) (json.RawMessage, error) {
+		seenCommand = command
+		seenInput = input
+		return json.RawMessage(`{"command":"git","exit_code":0,"stdout":"ok"}`), nil
+	}))
+	resp, err := client.ProcessRun(ProcessRunRequest{Command: "git", Args: []string{"status"}, TimeoutMS: 1000})
+	if err != nil {
+		t.Fatalf("ProcessRun: %v", err)
+	}
+	if seenCommand != protocol.HostCapabilityProcessRun {
+		t.Fatalf("command = %q", seenCommand)
+	}
+	input := seenInput.(ProcessRunRequest)
+	if input.Command != "git" || len(input.Args) != 1 || input.Args[0] != "status" || input.TimeoutMS != 1000 {
+		t.Fatalf("input = %#v", input)
+	}
+	if resp.Command != "git" || resp.ExitCode != 0 || resp.Stdout != "ok" {
+		t.Fatalf("resp = %#v", resp)
+	}
+}
+
 func TestUnavailableClient(t *testing.T) {
 	_, err := NewClient(nil).Secret("token")
 	if err == nil {

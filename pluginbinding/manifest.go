@@ -3,16 +3,18 @@ package pluginbinding
 import (
 	"encoding/json"
 
+	fpcontext "github.com/fluxplane/fluxplane-context"
 	datasource "github.com/fluxplane/fluxplane-datasource"
 	manifest "github.com/fluxplane/fluxplane-plugin/manifest"
 )
 
 const (
-	CapabilitySearch = "search"
-	CapabilityList   = "list"
-	CapabilityLookup = "lookup"
-	CapabilityGet    = "get"
-	CapabilityIndex  = "index"
+	CapabilitySearch   = "search"
+	CapabilityList     = "list"
+	CapabilityLookup   = "lookup"
+	CapabilityGet      = "get"
+	CapabilityBatchGet = "batch_get"
+	CapabilityIndex    = "index"
 
 	ContextKindText      = "text"
 	ContextKindReference = "reference"
@@ -190,10 +192,18 @@ func Datasource(name, entity, description string, capabilities ...string) manife
 
 func ContextSpec(name, description string, kinds ...string) manifest.ContextSpec {
 	return manifest.ContextSpec{
-		Name:        name,
+		Name:        fpcontext.ProviderName(name),
 		Description: description,
-		Kinds:       append([]string(nil), kinds...),
+		Kinds:       blockKinds(kinds),
 	}
+}
+
+func blockKinds(values []string) []fpcontext.BlockKind {
+	out := make([]fpcontext.BlockKind, 0, len(values))
+	for _, value := range values {
+		out = append(out, fpcontext.BlockKind(value))
+	}
+	return out
 }
 
 func Endpoint(name, description string, products ...string) manifest.EndpointSpec {
@@ -234,7 +244,7 @@ func IndexedDatasourceWithOptions(name, entity, description, indexDescription st
 }
 
 func SearchableIndexCapabilities() []string {
-	return []string{CapabilitySearch, CapabilityList, CapabilityLookup, CapabilityGet, CapabilityIndex}
+	return []string{CapabilitySearch, CapabilityList, CapabilityLookup, CapabilityGet, CapabilityBatchGet, CapabilityIndex}
 }
 
 func authEnv(fields []manifest.AuthField) []string {

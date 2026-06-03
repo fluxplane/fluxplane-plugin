@@ -12,12 +12,16 @@ type LookupSource = sdkdatasource.LookupSource
 type LookupMatch[R any] = sdkdatasource.LookupMatch[R]
 type LookupCandidate = sdkdatasource.LookupCandidate
 type DatasourceSearchInput = sdkdatasource.SearchInput
+type DatasourceListInput = sdkdatasource.ListInput
 type DatasourceLookupInput = sdkdatasource.LookupInput
 type DatasourceGetInput = sdkdatasource.GetInput
+type DatasourceBatchGetInput = sdkdatasource.BatchGetInput
 type DatasourceSearchResult[T any] = sdkdatasource.SearchResult[T]
+type DatasourceListResult = sdkdatasource.ListResult
 type DatasourceError = sdkdatasource.Error
 type DatasourceLookupResult[T any] = sdkdatasource.LookupResult[T]
 type DatasourceGetResult[T any] = sdkdatasource.GetResult[T]
+type DatasourceBatchGetResult = sdkdatasource.BatchGetResult
 type DatasourceRecordOption = sdkdatasource.RecordOption
 
 func (ctx Context) DatasourceSource() DatasourceSource {

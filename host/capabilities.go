@@ -8,6 +8,7 @@ const (
 	CapabilityBlobRead  = "blob.read"
 	CapabilityBlobWrite = "blob.write"
 	CapabilityEnvLookup = "env.lookup"
+	CapabilityProcess   = "process.run"
 	CapabilityProvider  = "provider.call"
 )
 
@@ -89,6 +90,33 @@ type EnvLookupResponse struct {
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
 	Found bool   `json:"found"`
+}
+
+type ProcessRunRequest struct {
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	Workdir   string            `json:"workdir,omitempty"`
+	Env       []string          `json:"env,omitempty"`
+	TimeoutMS int               `json:"timeout_ms,omitempty"`
+	MaxStdout int64             `json:"max_stdout,omitempty"`
+	MaxStderr int64             `json:"max_stderr,omitempty"`
+	Label     string            `json:"label,omitempty"`
+	Group     string            `json:"group,omitempty"`
+	Tags      []string          `json:"tags,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+type ProcessRunResponse struct {
+	Command         string   `json:"command"`
+	Args            []string `json:"args,omitempty"`
+	Workdir         string   `json:"workdir,omitempty"`
+	ExitCode        int      `json:"exit_code"`
+	TimedOut        bool     `json:"timed_out,omitempty"`
+	DurationMS      int64    `json:"duration_ms,omitempty"`
+	Stdout          string   `json:"stdout,omitempty"`
+	Stderr          string   `json:"stderr,omitempty"`
+	StdoutTruncated bool     `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool     `json:"stderr_truncated,omitempty"`
 }
 
 type ProviderCallRequest struct {

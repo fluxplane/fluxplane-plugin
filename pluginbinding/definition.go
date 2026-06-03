@@ -83,9 +83,21 @@ func RegisterDatasourceLookup[I any, O any](spec manifest.DatasourceSpec, handle
 	}
 }
 
+func RegisterDatasourceList[I any, O any](spec manifest.DatasourceSpec, handler DatasourceHandler[I, O]) PluginOption {
+	return func(plugin *Plugin) {
+		DatasourceHandlerFor(plugin, spec, CapabilityList, handler)
+	}
+}
+
 func RegisterDatasourceGet[I any, O any](spec manifest.DatasourceSpec, handler DatasourceHandler[I, O]) PluginOption {
 	return func(plugin *Plugin) {
 		DatasourceHandlerFor(plugin, spec, CapabilityGet, handler)
+	}
+}
+
+func RegisterDatasourceBatchGet[I any, O any](spec manifest.DatasourceSpec, handler DatasourceHandler[I, O]) PluginOption {
+	return func(plugin *Plugin) {
+		DatasourceHandlerFor(plugin, spec, CapabilityBatchGet, handler)
 	}
 }
 

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"time"
 
+	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
 const DefaultInstance = "default"
@@ -228,6 +230,24 @@ type AuthConnectRequest struct {
 	DryRun   bool              `json:"dry_run,omitempty"`
 }
 
+// AuthAutoRequest connects auth by importing manifest-declared environment variables.
+type AuthAutoRequest struct {
+	Ref      Ref    `json:"ref"`
+	Instance string `json:"instance,omitempty"`
+	DryRun   bool   `json:"dry_run,omitempty"`
+}
+
+// AuthAutoResult describes an environment import outcome.
+type AuthAutoResult struct {
+	Plugin   Ref      `json:"plugin"`
+	Instance string   `json:"instance"`
+	Saved    []string `json:"saved,omitempty"`
+	Missing  []string `json:"missing,omitempty"`
+	Skipped  []string `json:"skipped,omitempty"`
+	Changed  bool     `json:"changed"`
+	Message  string   `json:"message,omitempty"`
+}
+
 // AuthTestRequest records the result of testing auth for a plugin instance.
 type AuthTestRequest struct {
 	Ref      Ref    `json:"ref"`
@@ -280,6 +300,20 @@ type OperationInvokeResult struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 }
 
+// OperationBatchRequest calls multiple operations on one plugin instance.
+type OperationBatchRequest struct {
+	Ref      Ref                      `json:"ref"`
+	Instance string                   `json:"instance,omitempty"`
+	Calls    []protocol.OperationCall `json:"calls"`
+}
+
+// OperationBatchResult contains a protocol batch result payload.
+type OperationBatchResult struct {
+	Plugin   Ref             `json:"plugin"`
+	Instance string          `json:"instance"`
+	Result   json.RawMessage `json:"result,omitempty"`
+}
+
 // DatasourceListRequest requests datasources from the plugin runtime.
 type DatasourceListRequest = RuntimeRequest
 
@@ -304,6 +338,173 @@ type DatasourceCallResult struct {
 	Instance   string          `json:"instance"`
 	Capability string          `json:"capability"`
 	Result     json.RawMessage `json:"result,omitempty"`
+}
+
+// ContextListRequest describes a context provider listing request.
+type ContextListRequest struct {
+	Ref      Ref    `json:"ref"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// ContextListResult contains context provider declarations advertised by a plugin.
+type ContextListResult struct {
+	Plugin   Ref                       `json:"plugin"`
+	Instance string                    `json:"instance,omitempty"`
+	Context  []sdkmanifest.ContextSpec `json:"context,omitempty"`
+}
+
+// ContextBuildRequest describes a context provider build request.
+type ContextBuildRequest struct {
+	Ref      Ref             `json:"ref"`
+	Instance string          `json:"instance,omitempty"`
+	Query    string          `json:"query,omitempty"`
+	Kinds    []string        `json:"kinds,omitempty"`
+	Limit    int             `json:"limit,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+}
+
+// ContextBuildResult contains a context build result payload.
+type ContextBuildResult struct {
+	Plugin   Ref             `json:"plugin"`
+	Instance string          `json:"instance,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+}
+
+// IndexBuildRequest asks a plugin to build one or more local index snapshots.
+type IndexBuildRequest struct {
+	Ref      Ref    `json:"ref"`
+	Instance string `json:"instance,omitempty"`
+	Index    string `json:"index,omitempty"`
+	Entity   string `json:"entity,omitempty"`
+	DryRun   bool   `json:"dry_run,omitempty"`
+}
+
+// IndexBuildResult describes stored index snapshots.
+type IndexBuildResult struct {
+	Plugin    Ref       `json:"plugin"`
+	Instance  string    `json:"instance"`
+	Index     string    `json:"index,omitempty"`
+	Indexes   []string  `json:"indexes,omitempty"`
+	Records   int       `json:"records"`
+	Stored    bool      `json:"stored"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Message   string    `json:"message,omitempty"`
+}
+
+// IndexStatusRequest asks for local index status.
+type IndexStatusRequest struct {
+	Ref      Ref    `json:"ref,omitempty"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// IndexStatusResult contains local index status for one or more plugins.
+type IndexStatusResult struct {
+	Plugin   Ref                    `json:"plugin,omitempty"`
+	Instance string                 `json:"instance,omitempty"`
+	Indexes  []IndexStatus          `json:"indexes,omitempty"`
+	Status   map[string]IndexStatus `json:"status,omitempty"`
+}
+
+// IndexStatus describes local index snapshots for one plugin instance.
+type IndexStatus struct {
+	Plugin    Ref                `json:"plugin"`
+	Instance  string             `json:"instance"`
+	Indexes   []string           `json:"indexes,omitempty"`
+	Records   int                `json:"records"`
+	UpdatedAt time.Time          `json:"updated_at,omitempty"`
+	Details   []IndexStatusEntry `json:"details,omitempty"`
+}
+
+// IndexStatusEntry describes one local index snapshot.
+type IndexStatusEntry struct {
+	Index     string          `json:"index"`
+	Records   int             `json:"records"`
+	UpdatedAt time.Time       `json:"updated_at,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+// EndpointDiscoverRequest asks a plugin to discover endpoint candidates.
+type EndpointDiscoverRequest struct {
+	Ref       Ref             `json:"ref"`
+	Instance  string          `json:"instance,omitempty"`
+	Product   string          `json:"product,omitempty"`
+	Context   string          `json:"context,omitempty"`
+	Namespace string          `json:"namespace,omitempty"`
+	Limit     int             `json:"limit,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+}
+
+// EndpointDiscoverResult contains endpoint discovery candidate payload.
+type EndpointDiscoverResult struct {
+	Plugin   Ref             `json:"plugin"`
+	Instance string          `json:"instance,omitempty"`
+	Result   json.RawMessage `json:"result,omitempty"`
+}
+
+// EndpointListRequest filters stored endpoints.
+type EndpointListRequest struct {
+	Product string `json:"product,omitempty"`
+}
+
+// EndpointListResult contains stored endpoints.
+type EndpointListResult struct {
+	Endpoints []fpendpoint.EndpointRef `json:"endpoints,omitempty"`
+	Records   []fpendpoint.Record      `json:"records,omitempty"`
+}
+
+// EndpointGetRequest gets one stored endpoint.
+type EndpointGetRequest struct {
+	ID string `json:"id"`
+}
+
+// EndpointGetResult contains one stored endpoint.
+type EndpointGetResult struct {
+	Endpoint fpendpoint.EndpointRef `json:"endpoint"`
+	Record   fpendpoint.Record      `json:"record,omitempty"`
+	Found    bool                   `json:"found"`
+}
+
+// EndpointSaveRequest stores or updates an endpoint.
+type EndpointSaveRequest struct {
+	Endpoint fpendpoint.EndpointRef `json:"endpoint"`
+	DryRun   bool                   `json:"dry_run,omitempty"`
+}
+
+// EndpointSaveResult describes a stored endpoint transition.
+type EndpointSaveResult struct {
+	Endpoint fpendpoint.EndpointRef `json:"endpoint"`
+	Record   fpendpoint.Record      `json:"record,omitempty"`
+	Saved    bool                   `json:"saved"`
+	Updated  bool                   `json:"updated,omitempty"`
+	Message  string                 `json:"message,omitempty"`
+}
+
+// EndpointHealthRequest stores the latest non-secret endpoint health probe.
+type EndpointHealthRequest struct {
+	ID     string            `json:"id"`
+	Health fpendpoint.Health `json:"health"`
+	DryRun bool              `json:"dry_run,omitempty"`
+}
+
+// EndpointHealthResult describes an endpoint health state transition.
+type EndpointHealthResult struct {
+	ID      string            `json:"id"`
+	Record  fpendpoint.Record `json:"record,omitempty"`
+	Saved   bool              `json:"saved"`
+	Message string            `json:"message,omitempty"`
+}
+
+// EndpointRemoveRequest removes one stored endpoint.
+type EndpointRemoveRequest struct {
+	ID     string `json:"id"`
+	DryRun bool   `json:"dry_run,omitempty"`
+}
+
+// EndpointRemoveResult describes endpoint removal.
+type EndpointRemoveResult struct {
+	ID      string `json:"id"`
+	Removed bool   `json:"removed"`
+	Message string `json:"message,omitempty"`
 }
 
 // Installer installs plugins.
@@ -340,6 +541,7 @@ type AuthManager interface {
 	AuthStatus(context.Context, AuthStatusRequest) (AuthStatusResult, error)
 	AuthMethods(context.Context, AuthMethodsRequest) (AuthMethodsResult, error)
 	AuthConnect(context.Context, AuthConnectRequest) (AuthResult, error)
+	AuthAuto(context.Context, AuthAutoRequest) (AuthAutoResult, error)
 	AuthTest(context.Context, AuthTestRequest) (AuthResult, error)
 	AuthDisconnect(context.Context, AuthDisconnectRequest) (AuthResult, error)
 }
@@ -348,12 +550,39 @@ type AuthManager interface {
 type OperationRunner interface {
 	ListOperations(context.Context, OperationListRequest) (OperationListResult, error)
 	InvokeOperation(context.Context, OperationInvokeRequest) (OperationInvokeResult, error)
+	BatchOperations(context.Context, OperationBatchRequest) (OperationBatchResult, error)
 }
 
 // DatasourceRunner lists and invokes plugin datasource capabilities.
 type DatasourceRunner interface {
 	ListDatasources(context.Context, DatasourceListRequest) (DatasourceListResult, error)
 	CallDatasource(context.Context, DatasourceCallRequest) (DatasourceCallResult, error)
+}
+
+// ContextRunner lists and builds plugin context provider output.
+type ContextRunner interface {
+	ListContextProviders(context.Context, ContextListRequest) (ContextListResult, error)
+	BuildContext(context.Context, ContextBuildRequest) (ContextBuildResult, error)
+}
+
+// EndpointRunner invokes plugin endpoint discovery.
+type EndpointRunner interface {
+	DiscoverEndpoints(context.Context, EndpointDiscoverRequest) (EndpointDiscoverResult, error)
+}
+
+// IndexManager builds and reports local plugin indexes.
+type IndexManager interface {
+	BuildIndex(context.Context, IndexBuildRequest) (IndexBuildResult, error)
+	IndexStatus(context.Context, IndexStatusRequest) (IndexStatusResult, error)
+}
+
+// EndpointStore manages stored host endpoint refs.
+type EndpointStore interface {
+	ListEndpoints(context.Context, EndpointListRequest) (EndpointListResult, error)
+	GetEndpoint(context.Context, EndpointGetRequest) (EndpointGetResult, error)
+	SaveEndpoint(context.Context, EndpointSaveRequest) (EndpointSaveResult, error)
+	SaveEndpointHealth(context.Context, EndpointHealthRequest) (EndpointHealthResult, error)
+	RemoveEndpoint(context.Context, EndpointRemoveRequest) (EndpointRemoveResult, error)
 }
 
 // Backend is the full backend surface used by the reusable CLI.
@@ -366,4 +595,8 @@ type Backend interface {
 	AuthManager
 	OperationRunner
 	DatasourceRunner
+	ContextRunner
+	EndpointRunner
+	IndexManager
+	EndpointStore
 }

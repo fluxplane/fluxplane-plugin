@@ -133,6 +133,10 @@ func (h *hostHTTPClientTestHost) EnvLookup(string) (EnvLookupResponse, error) {
 	return EnvLookupResponse{}, nil
 }
 
+func (h *hostHTTPClientTestHost) ProcessRun(ProcessRunRequest) (ProcessRunResponse, error) {
+	return ProcessRunResponse{}, nil
+}
+
 func (h *hostHTTPClientTestHost) CapabilityCall(ProviderCallRequest) (ProviderCallResponse, error) {
 	return ProviderCallResponse{}, nil
 }

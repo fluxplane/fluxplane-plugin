@@ -20,11 +20,15 @@ type LookupSource = fpdatasource.LookupSource
 type LookupMatch[R any] = fpdatasource.LookupMatch[R]
 type LookupCandidate = fpdatasource.LookupCandidate
 type SearchInput = fpdatasource.SearchInput
+type ListInput = fpdatasource.ListRequest
 type LookupInput = fpdatasource.LookupInput
 type GetInput = fpdatasource.GetInput
+type BatchGetInput = fpdatasource.BatchGetRequest
 type SearchResult[T any] = fpdatasource.SearchOutput[T]
+type ListResult = fpdatasource.ListResult
 type LookupResult[T any] = fpdatasource.LookupOutput[T]
 type GetResult[T any] = fpdatasource.GetOutput[T]
+type BatchGetResult = fpdatasource.BatchGetResult
 type Error = fpdatasource.Error
 type RecordOption = fpdatasource.RecordOption
 

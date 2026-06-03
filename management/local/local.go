@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	sdkhost "github.com/fluxplane/fluxplane-plugin/host"
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
@@ -165,6 +166,7 @@ func resolveMarketplaceLocalPath(entry sdkmanifest.PluginEntry, baseDir string) 
 type state struct {
 	Plugins   map[string]storedPlugin   `json:"plugins,omitempty"`
 	Instances map[string]storedInstance `json:"instances,omitempty"`
+	Endpoints map[string]storedEndpoint `json:"endpoints,omitempty"`
 }
 
 type storedPlugin struct {
@@ -175,6 +177,11 @@ type storedPlugin struct {
 
 type storedInstance struct {
 	management.Instance
+}
+
+type storedEndpoint struct {
+	Endpoint  fpendpoint.Record `json:"endpoint"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
 }
 
 // InstallPlugin installs or records a plugin in the local store.
@@ -629,6 +636,64 @@ func (b *Backend) AuthConnect(ctx context.Context, req management.AuthConnectReq
 	return management.AuthResult{Plugin: req.Ref, Instance: instance.Name, Auth: auth, Connected: true, Changed: changed}, nil
 }
 
+// AuthAuto imports manifest-declared auth fields from environment variables.
+func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) (management.AuthAutoResult, error) {
+	if err := validateRef(req.Ref); err != nil {
+		return management.AuthAutoResult{}, err
+	}
+	methods, err := b.AuthMethods(ctx, management.AuthMethodsRequest{Ref: req.Ref, Instance: req.Instance})
+	if err != nil {
+		return management.AuthAutoResult{}, err
+	}
+	instance := normalizeInstance(req.Instance)
+	result := management.AuthAutoResult{Plugin: req.Ref, Instance: instance}
+	metadataByMethod := map[string]map[string]string{}
+	for _, entry := range authFieldEntries(methods.Methods) {
+		name := strings.TrimSpace(entry.field.Name)
+		if name == "" {
+			continue
+		}
+		if value, ok := firstEnvValue(entry.field.Env); ok {
+			method := normalizeMethod(entry.method)
+			if metadataByMethod[method] == nil {
+				metadataByMethod[method] = map[string]string{}
+			}
+			metadataByMethod[method][name] = value
+			result.Saved = append(result.Saved, name)
+			continue
+		}
+		if entry.field.Required {
+			result.Missing = append(result.Missing, name)
+		} else {
+			result.Skipped = append(result.Skipped, name)
+		}
+	}
+	if len(metadataByMethod) == 0 {
+		if req.DryRun {
+			result.Message = "dry run"
+		}
+		return result, nil
+	}
+	if req.DryRun {
+		result.Changed = false
+		result.Message = "dry run"
+		return result, nil
+	}
+	for method, metadata := range metadataByMethod {
+		auth, err := b.AuthConnect(ctx, management.AuthConnectRequest{
+			Ref:      req.Ref,
+			Instance: instance,
+			Method:   method,
+			Metadata: metadata,
+		})
+		if err != nil {
+			return result, err
+		}
+		result.Changed = result.Changed || auth.Changed
+	}
+	return result, nil
+}
+
 // AuthTest asks the plugin runtime to test auth and records the latest test state.
 func (b *Backend) AuthTest(ctx context.Context, req management.AuthTestRequest) (management.AuthResult, error) {
 	if err := validateRef(req.Ref); err != nil {
@@ -707,6 +772,35 @@ func (b *Backend) InvokeOperation(ctx context.Context, req management.OperationI
 	return management.OperationInvokeResult{Plugin: req.Ref, Instance: instance, Operation: strings.TrimSpace(req.Operation), Result: copyRaw(resp.Result)}, nil
 }
 
+// BatchOperations calls multiple operations on one plugin runtime invocation.
+func (b *Backend) BatchOperations(ctx context.Context, req management.OperationBatchRequest) (management.OperationBatchResult, error) {
+	if len(req.Calls) == 0 {
+		return management.OperationBatchResult{}, errors.New("fluxplane-plugin: at least one operation call is required")
+	}
+	calls := make([]protocol.OperationCall, 0, len(req.Calls))
+	for i, call := range req.Calls {
+		call.Name = strings.TrimSpace(call.Name)
+		if call.Name == "" {
+			return management.OperationBatchResult{}, fmt.Errorf("fluxplane-plugin: batch call %d operation name is required", i+1)
+		}
+		if call.ID == "" {
+			call.ID = fmt.Sprintf("%d", i+1)
+		}
+		call.Input = copyRaw(call.Input)
+		calls = append(calls, call)
+	}
+	plugin, err := b.installedPlugin(req.Ref)
+	if err != nil {
+		return management.OperationBatchResult{}, err
+	}
+	instance := normalizeInstance(req.Instance)
+	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsBatch, protocol.OperationBatch{Calls: calls})
+	if err != nil {
+		return management.OperationBatchResult{}, err
+	}
+	return management.OperationBatchResult{Plugin: req.Ref, Instance: instance, Result: copyRaw(resp.Result)}, nil
+}
+
 // ListDatasources returns datasources advertised by the plugin runtime.
 func (b *Backend) ListDatasources(ctx context.Context, req management.DatasourceListRequest) (management.DatasourceListResult, error) {
 	plugin, err := b.installedPlugin(req.Ref)
@@ -740,11 +834,229 @@ func (b *Backend) CallDatasource(ctx context.Context, req management.DatasourceC
 		return management.DatasourceCallResult{}, err
 	}
 	instance := normalizeInstance(req.Instance)
+	if result, handled, err := b.callIndexedDatasource(plugin, instance, command, req.Input); err != nil || handled {
+		return management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: result}, err
+	}
 	resp, err := b.invokePlugin(ctx, plugin, instance, command, copyRaw(req.Input))
 	if err != nil {
 		return management.DatasourceCallResult{}, err
 	}
 	return management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: copyRaw(resp.Result)}, nil
+}
+
+// ListContextProviders returns context providers advertised by the plugin manifest.
+func (b *Backend) ListContextProviders(ctx context.Context, req management.ContextListRequest) (management.ContextListResult, error) {
+	manifestResult, err := b.PluginManifest(ctx, management.ManifestRequest{Ref: req.Ref})
+	if err != nil {
+		return management.ContextListResult{}, err
+	}
+	var manifest sdkmanifest.PluginManifest
+	if err := json.Unmarshal(manifestResult.Manifest, &manifest); err != nil {
+		return management.ContextListResult{}, fmt.Errorf("fluxplane-plugin: decode plugin manifest: %w", err)
+	}
+	return management.ContextListResult{Plugin: req.Ref, Instance: normalizeInstance(req.Instance), Context: append([]sdkmanifest.ContextSpec(nil), manifest.Context...)}, nil
+}
+
+// BuildContext asks a plugin runtime to build context blocks.
+func (b *Backend) BuildContext(ctx context.Context, req management.ContextBuildRequest) (management.ContextBuildResult, error) {
+	plugin, err := b.installedPlugin(req.Ref)
+	if err != nil {
+		return management.ContextBuildResult{}, err
+	}
+	instance := normalizeInstance(req.Instance)
+	payload := copyRaw(req.Input)
+	if len(payload) == 0 {
+		payload, err = json.Marshal(struct {
+			Query string   `json:"query,omitempty"`
+			Kinds []string `json:"kinds,omitempty"`
+			Limit int      `json:"limit,omitempty"`
+		}{
+			Query: strings.TrimSpace(req.Query),
+			Kinds: append([]string(nil), req.Kinds...),
+			Limit: req.Limit,
+		})
+		if err != nil {
+			return management.ContextBuildResult{}, err
+		}
+	}
+	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandContextBuild, payload)
+	if err != nil {
+		return management.ContextBuildResult{}, err
+	}
+	return management.ContextBuildResult{Plugin: req.Ref, Instance: instance, Result: copyRaw(resp.Result)}, nil
+}
+
+// DiscoverEndpoints asks a plugin runtime to discover endpoint candidates.
+func (b *Backend) DiscoverEndpoints(ctx context.Context, req management.EndpointDiscoverRequest) (management.EndpointDiscoverResult, error) {
+	plugin, err := b.installedPlugin(req.Ref)
+	if err != nil {
+		return management.EndpointDiscoverResult{}, err
+	}
+	instance := normalizeInstance(req.Instance)
+	payload := copyRaw(req.Input)
+	if len(payload) == 0 {
+		payload, err = json.Marshal(struct {
+			Product   string `json:"product,omitempty"`
+			Context   string `json:"context,omitempty"`
+			Namespace string `json:"namespace,omitempty"`
+			Limit     int    `json:"limit,omitempty"`
+		}{
+			Product:   strings.TrimSpace(req.Product),
+			Context:   strings.TrimSpace(req.Context),
+			Namespace: strings.TrimSpace(req.Namespace),
+			Limit:     req.Limit,
+		})
+		if err != nil {
+			return management.EndpointDiscoverResult{}, err
+		}
+	}
+	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandEndpointsDiscover, payload)
+	if err != nil {
+		return management.EndpointDiscoverResult{}, err
+	}
+	return management.EndpointDiscoverResult{Plugin: req.Ref, Instance: instance, Result: copyRaw(resp.Result)}, nil
+}
+
+// ListEndpoints returns locally stored endpoint refs.
+func (b *Backend) ListEndpoints(_ context.Context, req management.EndpointListRequest) (management.EndpointListResult, error) {
+	st, err := b.readState()
+	if err != nil {
+		return management.EndpointListResult{}, err
+	}
+	product := strings.TrimSpace(req.Product)
+	endpoints := make([]fpendpoint.EndpointRef, 0, len(st.Endpoints))
+	records := make([]fpendpoint.Record, 0, len(st.Endpoints))
+	for _, stored := range st.Endpoints {
+		record := stored.Endpoint
+		record.EndpointRef = record.EndpointRef.Normalize()
+		endpoint := record.EndpointRef
+		if product != "" && endpoint.Product != product {
+			continue
+		}
+		endpoints = append(endpoints, endpoint)
+		records = append(records, record)
+	}
+	sort.SliceStable(records, func(i, j int) bool {
+		if records[i].Product == records[j].Product {
+			return records[i].ID < records[j].ID
+		}
+		return records[i].Product < records[j].Product
+	})
+	sort.SliceStable(endpoints, func(i, j int) bool {
+		if endpoints[i].Product == endpoints[j].Product {
+			return endpoints[i].ID < endpoints[j].ID
+		}
+		return endpoints[i].Product < endpoints[j].Product
+	})
+	return management.EndpointListResult{Endpoints: endpoints, Records: records}, nil
+}
+
+// GetEndpoint returns one locally stored endpoint ref by id or @endpoint ref.
+func (b *Backend) GetEndpoint(_ context.Context, req management.EndpointGetRequest) (management.EndpointGetResult, error) {
+	id := fpendpoint.ParseRef(req.ID).ID()
+	if id == "" {
+		return management.EndpointGetResult{}, errors.New("fluxplane-plugin: endpoint id is required")
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.EndpointGetResult{}, err
+	}
+	stored, ok := st.Endpoints[id]
+	if !ok {
+		return management.EndpointGetResult{Found: false}, nil
+	}
+	record := stored.Endpoint
+	record.EndpointRef = record.EndpointRef.Normalize()
+	return management.EndpointGetResult{Endpoint: record.EndpointRef, Record: record, Found: true}, nil
+}
+
+// SaveEndpoint stores or updates one endpoint ref.
+func (b *Backend) SaveEndpoint(_ context.Context, req management.EndpointSaveRequest) (management.EndpointSaveResult, error) {
+	endpoint := req.Endpoint.Normalize()
+	if err := endpoint.Validate(); err != nil {
+		return management.EndpointSaveResult{}, err
+	}
+	if req.DryRun {
+		return management.EndpointSaveResult{Endpoint: endpoint, Saved: false, Message: "dry run"}, nil
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.EndpointSaveResult{}, err
+	}
+	existing, existed := st.Endpoints[endpoint.ID]
+	now := time.Now().UTC()
+	record := fpendpoint.Record{EndpointRef: endpoint, CreatedAt: now, UpdatedAt: now}
+	if existed {
+		record.CreatedAt = existing.Endpoint.CreatedAt
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = now
+		}
+		record.LastHealth = existing.Endpoint.LastHealth
+	}
+	st.Endpoints[endpoint.ID] = storedEndpoint{Endpoint: record, UpdatedAt: now}
+	if err := b.writeState(st); err != nil {
+		return management.EndpointSaveResult{}, err
+	}
+	return management.EndpointSaveResult{Endpoint: endpoint, Record: record, Saved: true, Updated: existed}, nil
+}
+
+// SaveEndpointHealth stores the latest non-secret endpoint health probe.
+func (b *Backend) SaveEndpointHealth(_ context.Context, req management.EndpointHealthRequest) (management.EndpointHealthResult, error) {
+	id := fpendpoint.ParseRef(req.ID).ID()
+	if id == "" {
+		return management.EndpointHealthResult{}, errors.New("fluxplane-plugin: endpoint id is required")
+	}
+	health := req.Health
+	if health.CheckedAt.IsZero() {
+		health.CheckedAt = time.Now().UTC()
+	} else {
+		health.CheckedAt = health.CheckedAt.UTC()
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.EndpointHealthResult{}, err
+	}
+	stored, ok := st.Endpoints[id]
+	if !ok {
+		return management.EndpointHealthResult{}, fmt.Errorf("fluxplane-plugin: endpoint %q is not stored", id)
+	}
+	record := stored.Endpoint
+	record.EndpointRef = record.EndpointRef.Normalize()
+	record.LastHealth = &health
+	record.UpdatedAt = time.Now().UTC()
+	if req.DryRun {
+		return management.EndpointHealthResult{ID: id, Record: record, Saved: false, Message: "dry run"}, nil
+	}
+	stored.Endpoint = record
+	stored.UpdatedAt = record.UpdatedAt
+	st.Endpoints[id] = stored
+	if err := b.writeState(st); err != nil {
+		return management.EndpointHealthResult{}, err
+	}
+	return management.EndpointHealthResult{ID: id, Record: record, Saved: true}, nil
+}
+
+// RemoveEndpoint deletes one locally stored endpoint ref.
+func (b *Backend) RemoveEndpoint(_ context.Context, req management.EndpointRemoveRequest) (management.EndpointRemoveResult, error) {
+	id := fpendpoint.ParseRef(req.ID).ID()
+	if id == "" {
+		return management.EndpointRemoveResult{}, errors.New("fluxplane-plugin: endpoint id is required")
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.EndpointRemoveResult{}, err
+	}
+	if _, ok := st.Endpoints[id]; !ok {
+		return management.EndpointRemoveResult{ID: id, Removed: false, Message: "endpoint was not stored"}, nil
+	}
+	if req.DryRun {
+		return management.EndpointRemoveResult{ID: id, Removed: false, Message: "dry run"}, nil
+	}
+	delete(st.Endpoints, id)
+	if err := b.writeState(st); err != nil {
+		return management.EndpointRemoveResult{}, err
+	}
+	return management.EndpointRemoveResult{ID: id, Removed: true}, nil
 }
 
 // AuthDisconnect clears stored auth state for a plugin instance.
@@ -1039,7 +1351,7 @@ func interfaceFlags(flags net.Flags) []string {
 }
 
 func (b *Backend) readState() (state, error) {
-	st := state{Plugins: map[string]storedPlugin{}, Instances: map[string]storedInstance{}}
+	st := state{Plugins: map[string]storedPlugin{}, Instances: map[string]storedInstance{}, Endpoints: map[string]storedEndpoint{}}
 	data, err := os.ReadFile(b.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
@@ -1058,6 +1370,9 @@ func (b *Backend) readState() (state, error) {
 	}
 	if st.Instances == nil {
 		st.Instances = map[string]storedInstance{}
+	}
+	if st.Endpoints == nil {
+		st.Endpoints = map[string]storedEndpoint{}
 	}
 	return st, nil
 }
@@ -1097,6 +1412,45 @@ func (b *Backend) instance(st state, ref management.Ref, name string) management
 
 func instanceKey(ref management.Ref, name string) string {
 	return ref.Key() + "#" + normalizeInstance(name)
+}
+
+type authFieldEntry struct {
+	method string
+	field  sdkmanifest.AuthField
+}
+
+func authFieldEntries(methods []sdkmanifest.AuthMethod) []authFieldEntry {
+	seen := map[string]bool{}
+	var out []authFieldEntry
+	for _, method := range methods {
+		methodName := normalizeMethod(method.Name)
+		for _, field := range method.Fields {
+			name := strings.TrimSpace(field.Name)
+			if name == "" || seen[name] {
+				continue
+			}
+			field.Name = name
+			if len(field.Env) == 0 {
+				field.Env = append(field.Env, method.Env...)
+			}
+			seen[name] = true
+			out = append(out, authFieldEntry{method: methodName, field: field})
+		}
+	}
+	return out
+}
+
+func firstEnvValue(keys []string) (string, bool) {
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func normalizeInstance(name string) string {
@@ -1185,8 +1539,12 @@ func datasourceCommand(capability string) string {
 	switch strings.TrimSpace(capability) {
 	case "search":
 		return protocol.CommandDatasourcesSearch
+	case "list", "records":
+		return protocol.CommandDatasourcesRecords
 	case "get":
 		return protocol.CommandDatasourcesGet
+	case "batch_get", "batch-get":
+		return protocol.CommandDatasourcesBatchGet
 	case "lookup":
 		return protocol.CommandDatasourcesLookup
 	default:

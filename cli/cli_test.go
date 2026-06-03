@@ -3,17 +3,34 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net"
 	"testing"
 
+	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	"github.com/fluxplane/fluxplane-plugin/management"
 )
 
 type fakeBackend struct {
-	installed management.InstallRequest
-	updated   management.UpdateRequest
-	enabled   management.SetEnabledRequest
-	connected management.AuthConnectRequest
-	invoked   management.OperationInvokeRequest
+	installed       management.InstallRequest
+	updated         management.UpdateRequest
+	enabled         management.SetEnabledRequest
+	connected       management.AuthConnectRequest
+	authAuto        management.AuthAutoRequest
+	invoked         management.OperationInvokeRequest
+	batched         management.OperationBatchRequest
+	datasource      management.DatasourceCallRequest
+	built           management.ContextBuildRequest
+	indexBuilt      management.IndexBuildRequest
+	indexStatusReq  management.IndexStatusRequest
+	discovered      management.EndpointDiscoverRequest
+	endpointListed  management.EndpointListRequest
+	endpointList    management.EndpointListResult
+	endpointGot     management.EndpointGetRequest
+	endpointGet     management.EndpointGetResult
+	endpointSaved   management.EndpointSaveRequest
+	endpointHealth  management.EndpointHealthRequest
+	endpointRemoved management.EndpointRemoveRequest
 }
 
 func (f *fakeBackend) InstallPlugin(_ context.Context, req management.InstallRequest) (management.InstallResult, error) {
@@ -68,6 +85,11 @@ func (f *fakeBackend) AuthConnect(_ context.Context, req management.AuthConnectR
 	return management.AuthResult{Plugin: req.Ref, Instance: req.Instance, Connected: true, Changed: true}, nil
 }
 
+func (f *fakeBackend) AuthAuto(_ context.Context, req management.AuthAutoRequest) (management.AuthAutoResult, error) {
+	f.authAuto = req
+	return management.AuthAutoResult{Plugin: req.Ref, Instance: req.Instance, Saved: []string{"access_token"}, Changed: !req.DryRun}, nil
+}
+
 func (f *fakeBackend) AuthTest(_ context.Context, req management.AuthTestRequest) (management.AuthResult, error) {
 	return management.AuthResult{Plugin: req.Ref, Instance: req.Instance, Connected: true, Changed: true}, nil
 }
@@ -82,7 +104,12 @@ func (f *fakeBackend) ListOperations(_ context.Context, req management.Operation
 
 func (f *fakeBackend) InvokeOperation(_ context.Context, req management.OperationInvokeRequest) (management.OperationInvokeResult, error) {
 	f.invoked = req
-	return management.OperationInvokeResult{Plugin: req.Ref, Instance: req.Instance, Operation: req.Operation, Result: []byte(`{"ok":true}`)}, nil
+	return management.OperationInvokeResult{Plugin: req.Ref, Instance: req.Instance, Operation: req.Operation, Result: []byte(`{"ok":true,"endpoint_url":"https://user:secret@example.test","rows":[{"ok":true}]}`)}, nil
+}
+
+func (f *fakeBackend) BatchOperations(_ context.Context, req management.OperationBatchRequest) (management.OperationBatchResult, error) {
+	f.batched = req
+	return management.OperationBatchResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"results":[]}`)}, nil
 }
 
 func (f *fakeBackend) ListDatasources(_ context.Context, req management.DatasourceListRequest) (management.DatasourceListResult, error) {
@@ -90,7 +117,63 @@ func (f *fakeBackend) ListDatasources(_ context.Context, req management.Datasour
 }
 
 func (f *fakeBackend) CallDatasource(_ context.Context, req management.DatasourceCallRequest) (management.DatasourceCallResult, error) {
+	f.datasource = req
 	return management.DatasourceCallResult{Plugin: req.Ref, Instance: req.Instance, Capability: req.Capability, Result: []byte(`{"ok":true}`)}, nil
+}
+
+func (f *fakeBackend) ListContextProviders(_ context.Context, req management.ContextListRequest) (management.ContextListResult, error) {
+	return management.ContextListResult{Plugin: req.Ref, Instance: req.Instance}, nil
+}
+
+func (f *fakeBackend) BuildContext(_ context.Context, req management.ContextBuildRequest) (management.ContextBuildResult, error) {
+	f.built = req
+	return management.ContextBuildResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"blocks":[]}`)}, nil
+}
+
+func (f *fakeBackend) BuildIndex(_ context.Context, req management.IndexBuildRequest) (management.IndexBuildResult, error) {
+	f.indexBuilt = req
+	return management.IndexBuildResult{Plugin: req.Ref, Instance: req.Instance, Index: "test.items", Indexes: []string{"test.items"}, Records: 1, Stored: !req.DryRun}, nil
+}
+
+func (f *fakeBackend) IndexStatus(_ context.Context, req management.IndexStatusRequest) (management.IndexStatusResult, error) {
+	f.indexStatusReq = req
+	return management.IndexStatusResult{Plugin: req.Ref, Instance: req.Instance, Indexes: []management.IndexStatus{{Plugin: req.Ref, Instance: req.Instance, Indexes: []string{"test.items"}, Records: 1}}}, nil
+}
+
+func (f *fakeBackend) DiscoverEndpoints(_ context.Context, req management.EndpointDiscoverRequest) (management.EndpointDiscoverResult, error) {
+	f.discovered = req
+	return management.EndpointDiscoverResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"candidates":[]}`)}, nil
+}
+
+func (f *fakeBackend) ListEndpoints(_ context.Context, req management.EndpointListRequest) (management.EndpointListResult, error) {
+	f.endpointListed = req
+	if len(f.endpointList.Records) > 0 || len(f.endpointList.Endpoints) > 0 {
+		return f.endpointList, nil
+	}
+	return management.EndpointListResult{Endpoints: []fpendpoint.EndpointRef{{ID: "gitlab", URL: "https://gitlab.example.com", Product: "gitlab"}}}, nil
+}
+
+func (f *fakeBackend) GetEndpoint(_ context.Context, req management.EndpointGetRequest) (management.EndpointGetResult, error) {
+	f.endpointGot = req
+	if f.endpointGet.Found {
+		return f.endpointGet, nil
+	}
+	return management.EndpointGetResult{Endpoint: fpendpoint.EndpointRef{ID: req.ID, URL: "https://gitlab.example.com", Product: "gitlab"}, Found: true}, nil
+}
+
+func (f *fakeBackend) SaveEndpoint(_ context.Context, req management.EndpointSaveRequest) (management.EndpointSaveResult, error) {
+	f.endpointSaved = req
+	return management.EndpointSaveResult{Endpoint: req.Endpoint, Saved: true}, nil
+}
+
+func (f *fakeBackend) SaveEndpointHealth(_ context.Context, req management.EndpointHealthRequest) (management.EndpointHealthResult, error) {
+	f.endpointHealth = req
+	return management.EndpointHealthResult{ID: req.ID, Saved: true}, nil
+}
+
+func (f *fakeBackend) RemoveEndpoint(_ context.Context, req management.EndpointRemoveRequest) (management.EndpointRemoveResult, error) {
+	f.endpointRemoved = req
+	return management.EndpointRemoveResult{ID: req.ID, Removed: true}, nil
 }
 
 func TestInstallCommandUsesBackend(t *testing.T) {
@@ -157,6 +240,22 @@ func TestAuthConnectCommandUsesBackend(t *testing.T) {
 	}
 }
 
+func TestAuthAutoCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"auth", "connect", "auto", "gitlab", "--instance", "work", "--dry-run"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.authAuto.Ref.Name != "gitlab" || backend.authAuto.Instance != "work" || !backend.authAuto.DryRun {
+		t.Fatalf("auth auto request = %#v", backend.authAuto)
+	}
+	if bytes.Contains(out.Bytes(), []byte("secret")) {
+		t.Fatalf("auth auto output leaked secret material:\n%s", out.String())
+	}
+}
+
 func TestOperationInvokeCommandUsesBackend(t *testing.T) {
 	backend := &fakeBackend{}
 	var out bytes.Buffer
@@ -170,6 +269,343 @@ func TestOperationInvokeCommandUsesBackend(t *testing.T) {
 	}
 	if string(backend.invoked.Input) != `{"limit":1}` {
 		t.Fatalf("operation input = %s", string(backend.invoked.Input))
+	}
+}
+
+func TestOperationBatchCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"operation", "batch", "gitlab", "--instance", "work", "--input", `{"calls":[{"name":"gitlab.project.list","input":{"limit":1}}]}`})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.batched.Ref.Name != "gitlab" || backend.batched.Instance != "work" {
+		t.Fatalf("operation batch request = %#v", backend.batched)
+	}
+	if len(backend.batched.Calls) != 1 || backend.batched.Calls[0].Name != "gitlab.project.list" || backend.batched.Calls[0].ID != "1" {
+		t.Fatalf("operation batch calls = %#v", backend.batched.Calls)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestDatasourceRecordsCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"datasource", "records", "gitlab", "--instance", "work", "--input", `{"entity":"gitlab.issue","limit":2}`})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.datasource.Ref.Name != "gitlab" || backend.datasource.Instance != "work" || backend.datasource.Capability != "list" {
+		t.Fatalf("datasource records request = %#v", backend.datasource)
+	}
+	if string(backend.datasource.Input) != `{"entity":"gitlab.issue","limit":2}` {
+		t.Fatalf("datasource records input = %s", string(backend.datasource.Input))
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestDatasourceBatchGetCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"datasource", "batch-get", "gitlab", "--instance", "work", "--input", `{"entity":"gitlab.issue","ids":["1","2"]}`})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.datasource.Ref.Name != "gitlab" || backend.datasource.Instance != "work" || backend.datasource.Capability != "batch_get" {
+		t.Fatalf("datasource batch-get request = %#v", backend.datasource)
+	}
+	if string(backend.datasource.Input) != `{"entity":"gitlab.issue","ids":["1","2"]}` {
+		t.Fatalf("datasource batch-get input = %s", string(backend.datasource.Input))
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestContextBuildCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"context", "build", "clock", "--instance", "work", "--query", "now", "--kind", "data", "--limit", "2"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.built.Ref.Name != "clock" || backend.built.Instance != "work" || backend.built.Query != "now" || backend.built.Limit != 2 {
+		t.Fatalf("context build request = %#v", backend.built)
+	}
+	if len(backend.built.Kinds) != 1 || backend.built.Kinds[0] != "data" {
+		t.Fatalf("context build kinds = %#v", backend.built.Kinds)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestIndexCommandsUseBackend(t *testing.T) {
+	t.Run("build", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"index", "build", "gitlab", "--instance", "work", "--index", "gitlab.issues", "--entity", "gitlab.issue", "--dry-run"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.indexBuilt.Ref.Name != "gitlab" || backend.indexBuilt.Instance != "work" || backend.indexBuilt.Index != "gitlab.issues" || backend.indexBuilt.Entity != "gitlab.issue" || !backend.indexBuilt.DryRun {
+			t.Fatalf("index build request = %#v", backend.indexBuilt)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("status", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"index", "status", "gitlab", "--instance", "work"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.indexStatusReq.Ref.Name != "gitlab" || backend.indexStatusReq.Instance != "work" {
+			t.Fatalf("index status request = %#v", backend.indexStatusReq)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+}
+
+func TestEndpointDiscoverCommandUsesBackend(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "discover", "kubernetes", "loki", "--instance", "work", "--context", "dev", "--namespace", "monitoring", "--limit", "3"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.discovered.Ref.Name != "kubernetes" || backend.discovered.Instance != "work" || backend.discovered.Product != "loki" || backend.discovered.Context != "dev" || backend.discovered.Namespace != "monitoring" || backend.discovered.Limit != 3 {
+		t.Fatalf("endpoint discover request = %#v", backend.discovered)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestEndpointStoreCommandsUseBackend(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"endpoint", "list", "--product", "gitlab"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.endpointListed.Product != "gitlab" {
+			t.Fatalf("endpoint list request = %#v", backend.endpointListed)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("get", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"endpoint", "get", "@endpoint/gitlab-dev"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.endpointGot.ID != "@endpoint/gitlab-dev" {
+			t.Fatalf("endpoint get request = %#v", backend.endpointGot)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("save", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"endpoint", "save", "gitlab-dev", "https://gitlab.example.com", "--product", "gitlab", "--protocol", "https", "--source", "manual", "--credential-ref", "@secret/gitlab", "--label", "env=dev", "--annotation", "owner=platform"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.endpointSaved.Endpoint.ID != "gitlab-dev" || backend.endpointSaved.Endpoint.URL != "https://gitlab.example.com" || backend.endpointSaved.Endpoint.Product != "gitlab" {
+			t.Fatalf("endpoint save request = %#v", backend.endpointSaved)
+		}
+		if backend.endpointSaved.Endpoint.Labels["env"] != "dev" || backend.endpointSaved.Endpoint.Annotations["owner"] != "platform" {
+			t.Fatalf("endpoint metadata = %#v %#v", backend.endpointSaved.Endpoint.Labels, backend.endpointSaved.Endpoint.Annotations)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("health", func(t *testing.T) {
+		backend := &fakeBackend{}
+		var out bytes.Buffer
+		cmd := New(Options{Backend: backend, Out: &out})
+		cmd.SetArgs([]string{"endpoint", "health", "@endpoint/gitlab-dev", "--ok", "--method", "tcp_connect", "--duration-ms", "42", "--detail", "address=gitlab.example.com:443", "--metadata", "source=test"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.endpointHealth.ID != "@endpoint/gitlab-dev" || !backend.endpointHealth.Health.OK || backend.endpointHealth.Health.Method != "tcp_connect" || backend.endpointHealth.Health.DurationMS != 42 {
+			t.Fatalf("endpoint health request = %#v", backend.endpointHealth)
+		}
+		if backend.endpointHealth.Health.Details["address"] != "gitlab.example.com:443" || backend.endpointHealth.Health.Metadata["source"] != "test" {
+			t.Fatalf("endpoint health metadata = %#v %#v", backend.endpointHealth.Health.Details, backend.endpointHealth.Health.Metadata)
+		}
+		if out.Len() == 0 {
+			t.Fatalf("expected JSON output")
+		}
+	})
+	t.Run("remove", func(t *testing.T) {
+		backend := &fakeBackend{}
+		cmd := New(Options{Backend: backend})
+		cmd.SetArgs([]string{"endpoint", "remove", "@endpoint/gitlab-dev", "--dry-run"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if backend.endpointRemoved.ID != "@endpoint/gitlab-dev" || !backend.endpointRemoved.DryRun {
+			t.Fatalf("endpoint remove request = %#v", backend.endpointRemoved)
+		}
+	})
+}
+
+func TestEndpointImportCommandSavesSelectedCandidate(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetIn(bytes.NewBufferString(`{"candidates":[{"index":2,"id":"mysql-abc","url":"mysql://db.example.com:3306/app","product":"mysql","protocol":"mysql","source":"kubernetes_secret","credential_ref":"kubernetes://latest/secrets/mysql","labels":{"namespace":"latest"}}]}`))
+	cmd.SetArgs([]string{"endpoint", "import", "-", "--candidate", "2", "--id", "latest-mysql", "--label", "role=read", "--annotation", "owner=platform"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.endpointSaved.Endpoint.ID != "latest-mysql" || backend.endpointSaved.Endpoint.URL != "mysql://db.example.com:3306/app" || backend.endpointSaved.Endpoint.Product != "mysql" {
+		t.Fatalf("endpoint save request = %#v", backend.endpointSaved)
+	}
+	if backend.endpointSaved.Endpoint.CredentialRef != "kubernetes://latest/secrets/mysql" || backend.endpointSaved.Endpoint.Source != "kubernetes_secret" {
+		t.Fatalf("endpoint source/credential = %#v", backend.endpointSaved.Endpoint)
+	}
+	if backend.endpointSaved.Endpoint.Labels["namespace"] != "latest" || backend.endpointSaved.Endpoint.Labels["role"] != "read" || backend.endpointSaved.Endpoint.Annotations["owner"] != "platform" {
+		t.Fatalf("endpoint metadata = %#v %#v", backend.endpointSaved.Endpoint.Labels, backend.endpointSaved.Endpoint.Annotations)
+	}
+	if out.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+}
+
+func TestEndpointImportCommandAcceptsDiscoverResultWrapper(t *testing.T) {
+	backend := &fakeBackend{}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetIn(bytes.NewBufferString(`{"plugin":{"name":"kubernetes"},"instance":"work","result":{"candidates":[{"id":"loki-dev","url":"http://loki.monitoring:3100","product":"loki","protocol":"http","source":"kubernetes_service"}]}}`))
+	cmd.SetArgs([]string{"endpoint", "import", "-"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.endpointSaved.Endpoint.ID != "loki-dev" || backend.endpointSaved.Endpoint.URL != "http://loki.monitoring:3100" || backend.endpointSaved.Endpoint.Product != "loki" {
+		t.Fatalf("endpoint save request = %#v", backend.endpointSaved)
+	}
+	if backend.endpointSaved.Endpoint.Source != "kubernetes_service" {
+		t.Fatalf("endpoint source = %q", backend.endpointSaved.Endpoint.Source)
+	}
+}
+
+func TestEndpointDoctorCommandTestsTCPAndStoresHealth(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	backend := &fakeBackend{
+		endpointList: management.EndpointListResult{
+			Records: []fpendpoint.Record{{
+				EndpointRef: fpendpoint.EndpointRef{
+					ID:       "local-tcp",
+					URL:      "tcp://" + listener.Addr().String(),
+					Product:  "custom",
+					Protocol: "tcp",
+				},
+			}},
+		},
+	}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "doctor", "custom"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.endpointListed.Product != "custom" {
+		t.Fatalf("endpoint list request = %#v", backend.endpointListed)
+	}
+	if backend.endpointHealth.ID != "local-tcp" || !backend.endpointHealth.Health.OK || backend.endpointHealth.Health.Method != "tcp_connect" {
+		t.Fatalf("endpoint health request = %#v", backend.endpointHealth)
+	}
+	if backend.endpointHealth.Health.Details["address"] != listener.Addr().String() {
+		t.Fatalf("endpoint health details = %#v", backend.endpointHealth.Health.Details)
+	}
+	var result endpointDoctorResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if result.Count != 1 || result.OK != 1 || result.Failed != 0 || len(result.Endpoints) != 1 {
+		t.Fatalf("doctor result = %#v", result)
+	}
+}
+
+func TestEndpointTestCommandUsesPluginProbeForKubernetesEndpoint(t *testing.T) {
+	backend := &fakeBackend{
+		endpointGet: management.EndpointGetResult{
+			Found: true,
+			Record: fpendpoint.Record{
+				EndpointRef: fpendpoint.EndpointRef{
+					ID:       "dev-cluster",
+					URL:      "kubernetes://context/dev",
+					Product:  "kubernetes",
+					Protocol: "kubernetes",
+				},
+			},
+		},
+	}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "test", "dev-cluster", "--instance", "work"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if backend.endpointGot.ID != "dev-cluster" {
+		t.Fatalf("endpoint get request = %#v", backend.endpointGot)
+	}
+	if backend.invoked.Ref.Name != "kubernetes" || backend.invoked.Instance != "work" || backend.invoked.Operation != "kubernetes.cluster.test" {
+		t.Fatalf("operation invoke request = %#v", backend.invoked)
+	}
+	if backend.endpointHealth.ID != "dev-cluster" || !backend.endpointHealth.Health.OK || backend.endpointHealth.Health.Method != "kubernetes.cluster.test" {
+		t.Fatalf("endpoint health request = %#v", backend.endpointHealth)
+	}
+	var result endpointTestResult
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if got, _ := result.Details["endpoint_url"].(string); got != "https://user:xxxxx@example.test" {
+		t.Fatalf("redacted endpoint url = %q details=%#v", got, result.Details)
+	}
+	if _, ok := result.Details["rows"]; ok {
+		t.Fatalf("rows should not be retained in endpoint health details: %#v", result.Details)
 	}
 }
 

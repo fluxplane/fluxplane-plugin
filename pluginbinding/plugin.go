@@ -1,6 +1,7 @@
 package pluginbinding
 
 import (
+	stdcontext "context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	fpcontext "github.com/fluxplane/fluxplane-context"
 	manifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
 	"github.com/invopop/jsonschema"
@@ -23,6 +25,7 @@ type Plugin struct {
 }
 
 type Context struct {
+	stdcontext.Context
 	Request protocol.Request
 	Call    protocol.OperationCall
 	Cache   *Cache
@@ -84,9 +87,17 @@ type typedContextProvider struct {
 }
 
 type ContextBuildInput struct {
-	Query string   `json:"query,omitempty" jsonschema:"description=Context query."`
-	Kinds []string `json:"kinds,omitempty" jsonschema:"description=Optional context block kind filters."`
-	Limit int      `json:"limit,omitempty" jsonschema:"description=Maximum context blocks to return."`
+	ThreadID      string                 `json:"thread_id,omitempty" jsonschema:"description=Conversation or thread id for this context render."`
+	BranchID      string                 `json:"branch_id,omitempty" jsonschema:"description=Optional branch id for this context render."`
+	TurnID        string                 `json:"turn_id,omitempty" jsonschema:"description=Turn id for this context render."`
+	Reason        fpcontext.RenderReason `json:"reason,omitempty" jsonschema:"description=Reason this context is being rendered."`
+	InputText     string                 `json:"input_text,omitempty" jsonschema:"description=Current user-visible input text."`
+	RecentContext string                 `json:"recent_context,omitempty" jsonschema:"description=Recent conversation or rendered context summary."`
+	Scope         map[string]string      `json:"scope,omitempty" jsonschema:"description=Runtime scope values for context selection."`
+	BudgetTokens  int                    `json:"budget_tokens,omitempty" jsonschema:"description=Approximate token budget for produced context."`
+	Query         string                 `json:"query,omitempty" jsonschema:"description=Compatibility context query, usually input_text or recent_context."`
+	Kinds         []string               `json:"kinds,omitempty" jsonschema:"description=Optional context block kind filters."`
+	Limit         int                    `json:"limit,omitempty" jsonschema:"description=Maximum context blocks to return."`
 }
 
 type ContextBuildResult struct {
@@ -154,7 +165,7 @@ func ContextProvider(plugin *Plugin, spec manifest.ContextSpec, handler ContextP
 	if plugin == nil {
 		return
 	}
-	if strings.TrimSpace(spec.Name) == "" {
+	if strings.TrimSpace(string(spec.Name)) == "" {
 		panic("pluginbinding: context provider name is required")
 	}
 	if handler == nil {
@@ -200,7 +211,7 @@ func (p *Plugin) AuthTestOperation(name string) {
 		if ctx.Request.Grant == "" {
 			return OKText(p.manifest.Name+" auth is host-managed; use dex auth status "+p.manifest.Name+" or dex op run "+name, map[string]any{"status": "host_managed"})
 		}
-		return p.callOperation(ctx.Request, protocol.OperationCall{Name: name}, NewCache(), ctx.Host, ctx.Events, true)
+		return p.callOperation(ctx.Context, ctx.Request, protocol.OperationCall{Name: name}, NewCache(), ctx.Host, ctx.Events, true)
 	})
 }
 
@@ -209,7 +220,7 @@ func (p *Plugin) IndexBuildOperation(name string) {
 		if ctx.Request.Grant == "" {
 			return OKText("Use dex op run "+name+" to build live records", map[string]any{"status": "requires_operation_grant"})
 		}
-		return p.callOperation(ctx.Request, protocol.OperationCall{Name: name, Input: ctx.Request.Payload}, NewCache(), ctx.Host, ctx.Events, false)
+		return p.callOperation(ctx.Context, ctx.Request, protocol.OperationCall{Name: name, Input: ctx.Request.Payload}, NewCache(), ctx.Host, ctx.Events, false)
 	})
 }
 
@@ -222,8 +233,15 @@ func (p *Plugin) HandleWithHost(req protocol.Request, host HostClient) protocol.
 }
 
 func (p *Plugin) HandleWithHostAndEvents(req protocol.Request, host HostClient, events EventSink) protocol.Response {
+	return p.HandleWithContextHostAndEvents(stdcontext.Background(), req, host, events)
+}
+
+func (p *Plugin) HandleWithContextHostAndEvents(ctx stdcontext.Context, req protocol.Request, host HostClient, events EventSink) protocol.Response {
 	if p == nil {
 		return protocol.Fail("plugin_error", "plugin is nil")
+	}
+	if ctx == nil {
+		ctx = stdcontext.Background()
 	}
 	if host == nil {
 		host = newHostClient(nil)
@@ -232,9 +250,9 @@ func (p *Plugin) HandleWithHostAndEvents(req protocol.Request, host HostClient, 
 		events = unavailableEventSink{}
 	}
 	cache := NewCache()
-	ctx := Context{Request: req, Cache: cache, Host: host, Events: events, plugin: p}
+	bindingCtx := Context{Context: ctx, Request: req, Cache: cache, Host: host, Events: events, plugin: p}
 	if handler := p.commandHandlers[req.Command]; handler != nil {
-		return handler(ctx)
+		return handler(bindingCtx)
 	}
 	switch req.Command {
 	case protocol.CommandManifest:
@@ -248,19 +266,23 @@ func (p *Plugin) HandleWithHostAndEvents(req protocol.Request, host HostClient, 
 		if err != nil {
 			return protocol.Fail("bad_payload", err.Error())
 		}
-		return p.callOperation(req, call, cache, host, events, true)
+		return p.callOperation(ctx, req, call, cache, host, events, true)
 	case protocol.CommandOperationsBatch:
-		return p.callBatch(req, cache, host, events)
+		return p.callBatch(ctx, req, cache, host, events)
 	case protocol.CommandDatasourcesList:
 		return protocol.OK(p.Manifest().Datasources)
+	case protocol.CommandDatasourcesRecords:
+		return p.runDatasource(bindingCtx, CapabilityList)
 	case protocol.CommandDatasourcesSearch:
-		return p.runDatasource(ctx, CapabilitySearch)
+		return p.runDatasource(bindingCtx, CapabilitySearch)
 	case protocol.CommandDatasourcesGet:
-		return p.runDatasource(ctx, CapabilityGet)
+		return p.runDatasource(bindingCtx, CapabilityGet)
+	case protocol.CommandDatasourcesBatchGet:
+		return p.runDatasource(bindingCtx, CapabilityBatchGet)
 	case protocol.CommandDatasourcesLookup:
-		return p.runDatasource(ctx, CapabilityLookup)
+		return p.runDatasource(bindingCtx, CapabilityLookup)
 	case protocol.CommandContextBuild:
-		return p.runContext(ctx)
+		return p.runContext(bindingCtx)
 	case protocol.CommandEndpointsDiscover:
 		return OKData(map[string]any{"candidates": []manifest.EndpointCandidate{}})
 	default:
@@ -275,20 +297,20 @@ func (p *Plugin) Manifest() manifest.PluginManifest {
 	return manifest
 }
 
-func (p *Plugin) callBatch(req protocol.Request, cache *Cache, host HostClient, events EventSink) protocol.Response {
+func (p *Plugin) callBatch(ctx stdcontext.Context, req protocol.Request, cache *Cache, host HostClient, events EventSink) protocol.Response {
 	batch, err := protocol.DecodePayload[protocol.OperationBatch](req.Payload)
 	if err != nil {
 		return protocol.Fail("bad_payload", err.Error())
 	}
 	results := make([]protocol.OperationResult, 0, len(batch.Calls))
 	for _, call := range batch.Calls {
-		results = append(results, p.runOperation(req, call, cache, host, events))
+		results = append(results, p.runOperation(ctx, req, call, cache, host, events))
 	}
 	return protocol.OK(protocol.OperationBatchResult{Results: results})
 }
 
-func (p *Plugin) callOperation(req protocol.Request, call protocol.OperationCall, cache *Cache, host HostClient, events EventSink, unwrap bool) protocol.Response {
-	result := p.runOperation(req, call, cache, host, events)
+func (p *Plugin) callOperation(ctx stdcontext.Context, req protocol.Request, call protocol.OperationCall, cache *Cache, host HostClient, events EventSink, unwrap bool) protocol.Response {
+	result := p.runOperation(ctx, req, call, cache, host, events)
 	if !result.OK {
 		return protocol.Response{Protocol: protocol.Version, OK: false, Error: result.Error}
 	}
@@ -304,7 +326,7 @@ func (p *Plugin) callOperation(req protocol.Request, call protocol.OperationCall
 	return OKData(value)
 }
 
-func (p *Plugin) runOperation(req protocol.Request, call protocol.OperationCall, cache *Cache, host HostClient, events EventSink) protocol.OperationResult {
+func (p *Plugin) runOperation(ctx stdcontext.Context, req protocol.Request, call protocol.OperationCall, cache *Cache, host HostClient, events EventSink) protocol.OperationResult {
 	if call.ID == "" {
 		call.ID = call.Name
 	}
@@ -318,7 +340,10 @@ func (p *Plugin) runOperation(req protocol.Request, call protocol.OperationCall,
 	if events == nil {
 		events = unavailableEventSink{}
 	}
-	return op.Run(Context{Request: req, Call: call, Cache: cache, Host: host, Events: events, plugin: p})
+	if ctx == nil {
+		ctx = stdcontext.Background()
+	}
+	return op.Run(Context{Context: ctx, Request: req, Call: call, Cache: cache, Host: host, Events: events, plugin: p})
 }
 
 func (p *Plugin) RunOperation(req protocol.Request, call protocol.OperationCall, cache *Cache) protocol.OperationResult {
@@ -329,7 +354,7 @@ func (p *Plugin) RunOperationWithHost(req protocol.Request, call protocol.Operat
 	if cache == nil {
 		cache = NewCache()
 	}
-	return p.runOperation(req, call, cache, host, unavailableEventSink{})
+	return p.runOperation(stdcontext.Background(), req, call, cache, host, unavailableEventSink{})
 }
 
 func (p *Plugin) upsertOperation(spec manifest.OperationSpec) {
@@ -384,7 +409,7 @@ func (p *Plugin) runContext(ctx Context) protocol.Response {
 	}
 	var out ContextBuildResult
 	for _, provider := range p.contextProviders {
-		resp := provider.Run(Context{Request: ctx.Request, Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p})
+		resp := provider.Run(Context{Context: ctx.Context, Request: ctx.Request, Cache: ctx.Cache, Host: ctx.Host, Events: ctx.Events, plugin: p})
 		if !resp.OK {
 			return resp
 		}
@@ -471,7 +496,7 @@ func (provider typedContextProvider) Run(ctx Context) protocol.Response {
 }
 
 func (ctx Context) NormalizeContextBlock(block manifest.ContextBlock) manifest.ContextBlock {
-	if strings.TrimSpace(block.Kind) == "" {
+	if strings.TrimSpace(string(block.Kind)) == "" {
 		block.Kind = ContextKindText
 	}
 	if block.Source == nil {
@@ -690,9 +715,9 @@ func mergeDatasourceSpec(base, generated manifest.DatasourceSpec) manifest.Datas
 }
 
 func mergeContextSpec(base, generated manifest.ContextSpec) manifest.ContextSpec {
-	base.Name = firstNonEmpty(base.Name, generated.Name)
+	base.Name = fpcontext.ProviderName(firstNonEmpty(string(base.Name), string(generated.Name)))
 	base.Description = firstNonEmpty(base.Description, generated.Description)
-	base.Kinds = mergeStrings(base.Kinds, generated.Kinds)
+	base.Kinds = mergeBlockKinds(base.Kinds, generated.Kinds)
 	return base
 }
 
@@ -709,7 +734,7 @@ func filterContextBlocks(blocks []manifest.ContextBlock, input ContextBuildInput
 	}
 	out := make([]manifest.ContextBlock, 0, len(blocks))
 	for _, block := range blocks {
-		if len(allowedKinds) > 0 && !allowedKinds[block.Kind] {
+		if len(allowedKinds) > 0 && !allowedKinds[string(block.Kind)] {
 			continue
 		}
 		out = append(out, block)
@@ -802,6 +827,22 @@ func mergeStrings(base, generated []string) []string {
 	out := append([]string(nil), base...)
 	for _, value := range generated {
 		out = ensureString(out, value)
+	}
+	return out
+}
+
+func mergeBlockKinds(base, generated []fpcontext.BlockKind) []fpcontext.BlockKind {
+	out := append([]fpcontext.BlockKind(nil), base...)
+	seen := map[fpcontext.BlockKind]bool{}
+	for _, value := range out {
+		seen[value] = true
+	}
+	for _, value := range generated {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
 	}
 	return out
 }

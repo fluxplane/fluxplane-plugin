@@ -1,16 +1,22 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	"github.com/fluxplane/fluxplane-plugin/management"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
 // Options configures the reusable plugin management command tree.
@@ -51,6 +57,9 @@ func New(opts Options) *cobra.Command {
 		newAuthCommand(opts.Backend),
 		newOperationCommand(opts.Backend),
 		newDatasourceCommand(opts.Backend),
+		newContextCommand(opts.Backend),
+		newIndexCommand(opts.Backend),
+		newEndpointCommand(opts.Backend),
 		newRunCommand(opts.Backend),
 	)
 	return cmd
@@ -141,6 +150,38 @@ func parseMetadata(values []string) (map[string]string, error) {
 		out[key] = strings.TrimSpace(val)
 	}
 	return out, nil
+}
+
+func mergeStringMaps(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range override {
+		out[key] = value
+	}
+	return out
+}
+
+func endpointSaveInput(args []string, input, inputFile string) (fpendpoint.EndpointRef, error) {
+	payload, err := readJSONPayload(input, inputFile)
+	if err != nil {
+		return fpendpoint.EndpointRef{}, err
+	}
+	if len(payload) > 0 {
+		var endpoint fpendpoint.EndpointRef
+		if err := json.Unmarshal(payload, &endpoint); err != nil {
+			return fpendpoint.EndpointRef{}, fmt.Errorf("fluxplane-plugin: endpoint input must be an endpoint JSON object: %w", err)
+		}
+		return endpoint, nil
+	}
+	if len(args) != 2 {
+		return fpendpoint.EndpointRef{}, errors.New("fluxplane-plugin: endpoint save requires ID and URL unless --input is provided")
+	}
+	return fpendpoint.EndpointRef{ID: strings.TrimSpace(args[0]), URL: strings.TrimSpace(args[1])}, nil
 }
 
 func newInstallCommand(backend management.Backend) *cobra.Command {
@@ -462,6 +503,48 @@ func newAuthConnectCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().StringVar(&method, "method", "default", "auth method")
 	cmd.Flags().StringArrayVar(&metadataValues, "field", nil, "auth field as key=value")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
+	cmd.AddCommand(newAuthAutoCommand(backend))
+	return cmd
+}
+
+func newAuthAutoCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "auto [PLUGIN[@VERSION]]",
+		Short: "Connect auth from manifest-declared environment variables",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			if len(args) == 1 {
+				result, err := backend.AuthAuto(cmd.Context(), management.AuthAutoRequest{Ref: parseRef(args[0]), Instance: instance, DryRun: dryRun})
+				if err != nil {
+					return err
+				}
+				return printJSON(cmd.OutOrStdout(), result)
+			}
+			plugins, err := backend.ListPlugins(cmd.Context(), management.ListRequest{All: true})
+			if err != nil {
+				return err
+			}
+			out := struct {
+				Instance string                      `json:"instance"`
+				Plugins  []management.AuthAutoResult `json:"plugins"`
+			}{Instance: instance}
+			for _, plugin := range plugins {
+				result, err := backend.AuthAuto(cmd.Context(), management.AuthAutoRequest{Ref: plugin.Ref, Instance: instance, DryRun: dryRun})
+				if err != nil {
+					result = management.AuthAutoResult{Plugin: plugin.Ref, Instance: instance, Message: err.Error()}
+				}
+				out.Plugins = append(out.Plugins, result)
+			}
+			return printJSON(cmd.OutOrStdout(), out)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
 	return cmd
 }
 
@@ -524,6 +607,7 @@ func newOperationCommand(backend management.Backend) *cobra.Command {
 	cmd.AddCommand(
 		newOperationListCommand(backend),
 		newOperationInvokeCommand(backend),
+		newOperationBatchCommand(backend),
 	)
 	return cmd
 }
@@ -579,6 +663,72 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	return cmd
 }
 
+func newOperationBatchCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var input string
+	var inputFile string
+	cmd := &cobra.Command{
+		Use:   "batch PLUGIN[@VERSION]",
+		Short: "Invoke multiple plugin operations",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			payload, err := readJSONPayload(input, inputFile)
+			if err != nil {
+				return err
+			}
+			calls, err := parseOperationBatch(payload)
+			if err != nil {
+				return err
+			}
+			result, err := backend.BatchOperations(cmd.Context(), management.OperationBatchRequest{Ref: parseRef(args[0]), Instance: instance, Calls: calls})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&input, "input", "", "operation batch JSON")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation batch JSON file")
+	return cmd
+}
+
+func parseOperationBatch(raw json.RawMessage) ([]protocol.OperationCall, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("fluxplane-plugin: operation batch input is required")
+	}
+	var calls []protocol.OperationCall
+	if err := json.Unmarshal(raw, &calls); err == nil && len(calls) > 0 {
+		return normalizeOperationBatchCalls(calls)
+	}
+	var batch protocol.OperationBatch
+	if err := json.Unmarshal(raw, &batch); err != nil {
+		return nil, fmt.Errorf("fluxplane-plugin: operation batch input must be an array of calls or {\"calls\":[...]}: %w", err)
+	}
+	return normalizeOperationBatchCalls(batch.Calls)
+}
+
+func normalizeOperationBatchCalls(calls []protocol.OperationCall) ([]protocol.OperationCall, error) {
+	if len(calls) == 0 {
+		return nil, errors.New("fluxplane-plugin: operation batch must contain at least one call")
+	}
+	out := make([]protocol.OperationCall, 0, len(calls))
+	for i, call := range calls {
+		call.Name = strings.TrimSpace(call.Name)
+		if call.Name == "" {
+			return nil, fmt.Errorf("fluxplane-plugin: batch call %d operation name is required", i+1)
+		}
+		if strings.TrimSpace(call.ID) == "" {
+			call.ID = fmt.Sprintf("%d", i+1)
+		}
+		out = append(out, call)
+	}
+	return out, nil
+}
+
 func newDatasourceCommand(backend management.Backend) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "datasource",
@@ -587,8 +737,10 @@ func newDatasourceCommand(backend management.Backend) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newDatasourceListCommand(backend),
+		newDatasourceRecordsCommand(backend),
 		newDatasourceCallCommand(backend, "search"),
 		newDatasourceCallCommand(backend, "get"),
+		newDatasourceBatchGetCommand(backend),
 		newDatasourceCallCommand(backend, "lookup"),
 	)
 	return cmd
@@ -612,6 +764,22 @@ func newDatasourceListCommand(backend management.Backend) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	return cmd
+}
+
+func newDatasourceRecordsCommand(backend management.Backend) *cobra.Command {
+	cmd := newDatasourceCallCommand(backend, "list")
+	cmd.Use = "records PLUGIN[@VERSION]"
+	cmd.Aliases = []string{"list-records", "record-list"}
+	cmd.Short = "List datasource records"
+	return cmd
+}
+
+func newDatasourceBatchGetCommand(backend management.Backend) *cobra.Command {
+	cmd := newDatasourceCallCommand(backend, "batch_get")
+	cmd.Use = "batch-get PLUGIN[@VERSION]"
+	cmd.Aliases = []string{"batch"}
+	cmd.Short = "Get multiple datasource records"
 	return cmd
 }
 
@@ -642,6 +810,855 @@ func newDatasourceCallCommand(backend management.Backend, capability string) *co
 	cmd.Flags().StringVar(&input, "input", "", "datasource input JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "datasource input JSON file")
 	return cmd
+}
+
+func newContextCommand(backend management.Backend) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "context",
+		Aliases: []string{"ctx", "contexts"},
+		Short:   "List and build plugin context providers",
+	}
+	cmd.AddCommand(
+		newContextListCommand(backend),
+		newContextBuildCommand(backend),
+	)
+	return cmd
+}
+
+func newContextListCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	cmd := &cobra.Command{
+		Use:   "list PLUGIN[@VERSION]",
+		Short: "List plugin context providers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.ListContextProviders(cmd.Context(), management.ContextListRequest{Ref: parseRef(args[0]), Instance: instance})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	return cmd
+}
+
+func newContextBuildCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var query string
+	var kinds []string
+	var limit int
+	var input string
+	var inputFile string
+	cmd := &cobra.Command{
+		Use:     "build PLUGIN[@VERSION]",
+		Aliases: []string{"run"},
+		Short:   "Build plugin context blocks",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			payload, err := readJSONPayload(input, inputFile)
+			if err != nil {
+				return err
+			}
+			result, err := backend.BuildContext(cmd.Context(), management.ContextBuildRequest{Ref: parseRef(args[0]), Instance: instance, Query: query, Kinds: kinds, Limit: limit, Input: payload})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&query, "query", "", "context query")
+	cmd.Flags().StringArrayVar(&kinds, "kind", nil, "context block kind filter")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum context blocks to return")
+	cmd.Flags().StringVar(&input, "input", "", "context build input JSON")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "context build input JSON file")
+	return cmd
+}
+
+func newIndexCommand(backend management.Backend) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "index",
+		Short: "Build and inspect plugin indexes",
+	}
+	cmd.AddCommand(newIndexBuildCommand(backend))
+	cmd.AddCommand(newIndexStatusCommand(backend))
+	return cmd
+}
+
+func newIndexBuildCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var index string
+	var entity string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "build PLUGIN[@VERSION]",
+		Short: "Build plugin index records",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.BuildIndex(cmd.Context(), management.IndexBuildRequest{
+				Ref:      parseRef(args[0]),
+				Instance: instance,
+				Index:    index,
+				Entity:   entity,
+				DryRun:   dryRun,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&index, "index", "", "index name to build")
+	cmd.Flags().StringVar(&entity, "entity", "", "entity type to build")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and render without storing")
+	return cmd
+}
+
+func newIndexStatusCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	cmd := &cobra.Command{
+		Use:   "status [PLUGIN[@VERSION]]",
+		Short: "Show plugin index status",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			req := management.IndexStatusRequest{Instance: instance}
+			if len(args) > 0 {
+				req.Ref = parseRef(args[0])
+			}
+			result, err := backend.IndexStatus(cmd.Context(), req)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	return cmd
+}
+
+func newEndpointCommand(backend management.Backend) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:       "endpoint",
+		Aliases:   []string{"endpoints"},
+		Short:     "Discover and manage plugin endpoints",
+		ValidArgs: []string{"discover", "list", "get", "save", "health", "test", "doctor", "import", "remove"},
+	}
+	cmd.AddCommand(newEndpointListCommand(backend))
+	cmd.AddCommand(newEndpointGetCommand(backend))
+	cmd.AddCommand(newEndpointSaveCommand(backend))
+	cmd.AddCommand(newEndpointHealthCommand(backend))
+	cmd.AddCommand(newEndpointTestCommand(backend))
+	cmd.AddCommand(newEndpointDoctorCommand(backend))
+	cmd.AddCommand(newEndpointImportCommand(backend))
+	cmd.AddCommand(newEndpointRemoveCommand(backend))
+	cmd.AddCommand(newEndpointDiscoverCommand(backend))
+	return cmd
+}
+
+func newEndpointListCommand(backend management.Backend) *cobra.Command {
+	var product string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List stored endpoints",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.ListEndpoints(cmd.Context(), management.EndpointListRequest{Product: product})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&product, "product", "", "filter by product")
+	return cmd
+}
+
+func newEndpointGetCommand(backend management.Backend) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get ID",
+		Short: "Show a stored endpoint",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.GetEndpoint(cmd.Context(), management.EndpointGetRequest{ID: args[0]})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	return cmd
+}
+
+func newEndpointSaveCommand(backend management.Backend) *cobra.Command {
+	var product string
+	var protocolName string
+	var source string
+	var credentialRef string
+	var labelValues []string
+	var annotationValues []string
+	var input string
+	var inputFile string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "save [ID] [URL]",
+		Short: "Store an endpoint",
+		Args:  cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			endpoint, err := endpointSaveInput(args, input, inputFile)
+			if err != nil {
+				return err
+			}
+			if product != "" {
+				endpoint.Product = product
+			}
+			if protocolName != "" {
+				endpoint.Protocol = protocolName
+			}
+			if source != "" {
+				endpoint.Source = source
+			}
+			if credentialRef != "" {
+				endpoint.CredentialRef = credentialRef
+			}
+			labels, err := parseMetadata(labelValues)
+			if err != nil {
+				return err
+			}
+			annotations, err := parseMetadata(annotationValues)
+			if err != nil {
+				return err
+			}
+			endpoint.Labels = mergeStringMaps(endpoint.Labels, labels)
+			endpoint.Annotations = mergeStringMaps(endpoint.Annotations, annotations)
+			result, err := backend.SaveEndpoint(cmd.Context(), management.EndpointSaveRequest{Endpoint: endpoint, DryRun: dryRun})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&product, "product", "", "endpoint product")
+	cmd.Flags().StringVar(&protocolName, "protocol", "", "endpoint protocol")
+	cmd.Flags().StringVar(&source, "source", "", "endpoint source")
+	cmd.Flags().StringVar(&credentialRef, "credential-ref", "", "endpoint credential ref")
+	cmd.Flags().StringArrayVar(&labelValues, "label", nil, "endpoint label key=value")
+	cmd.Flags().StringArrayVar(&annotationValues, "annotation", nil, "endpoint annotation key=value")
+	cmd.Flags().StringVar(&input, "input", "", "endpoint JSON")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "endpoint JSON file")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate without writing")
+	return cmd
+}
+
+func newEndpointHealthCommand(backend management.Backend) *cobra.Command {
+	var ok bool
+	var method string
+	var durationMS int64
+	var errorMessage string
+	var detailValues []string
+	var metadataValues []string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "health ID",
+		Short: "Store endpoint health",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			details, err := parseMetadata(detailValues)
+			if err != nil {
+				return err
+			}
+			metadata, err := parseMetadata(metadataValues)
+			if err != nil {
+				return err
+			}
+			detailValues := map[string]any{}
+			for key, value := range details {
+				detailValues[key] = value
+			}
+			result, err := backend.SaveEndpointHealth(cmd.Context(), management.EndpointHealthRequest{
+				ID: args[0],
+				Health: fpendpoint.Health{
+					OK:         ok,
+					Method:     method,
+					DurationMS: durationMS,
+					Error:      errorMessage,
+					Details:    detailValues,
+					Metadata:   metadata,
+				},
+				DryRun: dryRun,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().BoolVar(&ok, "ok", false, "mark endpoint health as OK")
+	cmd.Flags().StringVar(&method, "method", "", "health probe method")
+	cmd.Flags().Int64Var(&durationMS, "duration-ms", 0, "health probe duration in milliseconds")
+	cmd.Flags().StringVar(&errorMessage, "error", "", "health probe error")
+	cmd.Flags().StringArrayVar(&detailValues, "detail", nil, "health detail key=value")
+	cmd.Flags().StringArrayVar(&metadataValues, "metadata", nil, "health metadata key=value")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate without writing")
+	return cmd
+}
+
+func newEndpointTestCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var failOnError bool
+	cmd := &cobra.Command{
+		Use:   "test ID",
+		Short: "Test a stored endpoint and update health",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			got, err := backend.GetEndpoint(cmd.Context(), management.EndpointGetRequest{ID: args[0]})
+			if err != nil {
+				return err
+			}
+			if !got.Found {
+				return fmt.Errorf("fluxplane-plugin: unknown endpoint %q", args[0])
+			}
+			record := got.Record
+			if record.ID == "" {
+				record.EndpointRef = got.Endpoint
+			}
+			result := testEndpoint(cmd.Context(), backend, instance, record)
+			if _, err := backend.SaveEndpointHealth(cmd.Context(), management.EndpointHealthRequest{ID: record.ID, Health: endpointHealthFromTestResult(result)}); err != nil {
+				return err
+			}
+			if err := printJSON(cmd.OutOrStdout(), result); err != nil {
+				return err
+			}
+			if failOnError && !result.OK {
+				if strings.TrimSpace(result.Error) != "" {
+					return fmt.Errorf("fluxplane-plugin: endpoint %q test failed: %s", record.ID, result.Error)
+				}
+				return fmt.Errorf("fluxplane-plugin: endpoint %q test failed", record.ID)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().BoolVar(&failOnError, "fail-on-error", true, "return a non-zero exit code when the endpoint test fails")
+	return cmd
+}
+
+func newEndpointDoctorCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var failOnError bool
+	cmd := &cobra.Command{
+		Use:   "doctor [PRODUCT]",
+		Short: "Test stored endpoints and update health",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			product := ""
+			if len(args) == 1 {
+				product = strings.TrimSpace(args[0])
+			}
+			result, err := doctorEndpoints(cmd.Context(), backend, instance, product)
+			if err != nil {
+				return err
+			}
+			if err := printJSON(cmd.OutOrStdout(), result); err != nil {
+				return err
+			}
+			if failOnError && result.Failed > 0 {
+				return fmt.Errorf("fluxplane-plugin: %d endpoint(s) failed health checks", result.Failed)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().BoolVar(&failOnError, "fail-on-error", true, "return a non-zero exit code when any endpoint test fails")
+	return cmd
+}
+
+func newEndpointImportCommand(backend management.Backend) *cobra.Command {
+	var from string
+	var candidateIndex int
+	var id string
+	var source string
+	var labelValues []string
+	var annotationValues []string
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "import [JSON|-]",
+		Short: "Import a discovered endpoint candidate",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			raw, err := endpointImportInput(cmd.InOrStdin(), from, args)
+			if err != nil {
+				return err
+			}
+			candidate, err := endpointCandidateFromImport(raw, candidateIndex)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(id) != "" {
+				candidate.ID = strings.TrimSpace(id)
+			}
+			if strings.TrimSpace(source) != "" {
+				candidate.Source = strings.TrimSpace(source)
+			}
+			labels, err := parseMetadata(labelValues)
+			if err != nil {
+				return err
+			}
+			annotations, err := parseMetadata(annotationValues)
+			if err != nil {
+				return err
+			}
+			candidate.Labels = mergeStringMaps(candidate.Labels, labels)
+			candidate.Annotations = mergeStringMaps(candidate.Annotations, annotations)
+			result, err := backend.SaveEndpoint(cmd.Context(), management.EndpointSaveRequest{Endpoint: candidate.EndpointRef(), DryRun: dryRun})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&from, "from", "", "read candidate JSON from file")
+	cmd.Flags().IntVar(&candidateIndex, "candidate", 0, "candidate index to import from discovery output")
+	cmd.Flags().StringVar(&id, "id", "", "endpoint ID override")
+	cmd.Flags().StringVar(&source, "source", "", "endpoint source override")
+	cmd.Flags().StringArrayVar(&labelValues, "label", nil, "endpoint label key=value")
+	cmd.Flags().StringArrayVar(&annotationValues, "annotation", nil, "endpoint annotation key=value")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate without writing")
+	return cmd
+}
+
+func newEndpointRemoveCommand(backend management.Backend) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:     "remove ID",
+		Aliases: []string{"rm", "delete"},
+		Short:   "Remove a stored endpoint",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			result, err := backend.RemoveEndpoint(cmd.Context(), management.EndpointRemoveRequest{ID: args[0], DryRun: dryRun})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate without writing")
+	return cmd
+}
+
+func newEndpointDiscoverCommand(backend management.Backend) *cobra.Command {
+	var instance string
+	var contextName string
+	var namespace string
+	var limit int
+	var input string
+	var inputFile string
+	cmd := &cobra.Command{
+		Use:   "discover PLUGIN[@VERSION] [PRODUCT]",
+		Short: "Discover endpoint candidates",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := backendRequired(backend); err != nil {
+				return err
+			}
+			payload, err := readJSONPayload(input, inputFile)
+			if err != nil {
+				return err
+			}
+			product := ""
+			if len(args) > 1 {
+				product = args[1]
+			}
+			result, err := backend.DiscoverEndpoints(cmd.Context(), management.EndpointDiscoverRequest{
+				Ref:       parseRef(args[0]),
+				Instance:  instance,
+				Product:   product,
+				Context:   contextName,
+				Namespace: namespace,
+				Limit:     limit,
+				Input:     payload,
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), result)
+		},
+	}
+	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&contextName, "context", "", "discovery context")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "discovery namespace")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum endpoint candidates to return")
+	cmd.Flags().StringVar(&input, "input", "", "endpoint discovery input JSON")
+	cmd.Flags().StringVar(&inputFile, "input-file", "", "endpoint discovery input JSON file")
+	return cmd
+}
+
+type endpointCandidateView struct {
+	Index int `json:"index,omitempty"`
+	fpendpoint.Candidate
+}
+
+type endpointDiscoveryPluginView struct {
+	Candidates []endpointCandidateView `json:"candidates,omitempty"`
+	Error      string                  `json:"error,omitempty"`
+}
+
+type endpointDiscoveryView struct {
+	Product    string                                 `json:"product,omitempty"`
+	Plugin     any                                    `json:"plugin,omitempty"`
+	Candidates []endpointCandidateView                `json:"candidates,omitempty"`
+	Results    map[string]endpointDiscoveryPluginView `json:"results,omitempty"`
+	Result     json.RawMessage                        `json:"result,omitempty"`
+}
+
+func endpointImportInput(in io.Reader, from string, args []string) ([]byte, error) {
+	if strings.TrimSpace(from) != "" {
+		data, err := os.ReadFile(strings.TrimSpace(from))
+		if err != nil {
+			return nil, fmt.Errorf("fluxplane-plugin: read endpoint import file: %w", err)
+		}
+		return data, nil
+	}
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "-" {
+		return []byte(strings.TrimSpace(args[0])), nil
+	}
+	data, err := io.ReadAll(in)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func endpointCandidateFromImport(raw []byte, selectedIndex int) (fpendpoint.Candidate, error) {
+	candidates, err := endpointCandidatesFromImport(raw)
+	if err != nil {
+		return fpendpoint.Candidate{}, err
+	}
+	if len(candidates) == 0 {
+		return fpendpoint.Candidate{}, errors.New("fluxplane-plugin: endpoint import JSON did not contain candidates")
+	}
+	if selectedIndex > 0 {
+		for i, candidate := range candidates {
+			if candidate.Index == selectedIndex || i+1 == selectedIndex {
+				return candidate.Candidate, nil
+			}
+		}
+		return fpendpoint.Candidate{}, fmt.Errorf("fluxplane-plugin: candidate %d not found", selectedIndex)
+	}
+	if len(candidates) == 1 {
+		return candidates[0].Candidate, nil
+	}
+	return fpendpoint.Candidate{}, errors.New("fluxplane-plugin: multiple candidates found; pass --candidate")
+}
+
+func endpointCandidatesFromImport(raw []byte) ([]endpointCandidateView, error) {
+	raw = []byte(strings.TrimSpace(string(raw)))
+	if len(raw) == 0 {
+		return nil, errors.New("fluxplane-plugin: endpoint import input is empty")
+	}
+	var single endpointCandidateView
+	if err := json.Unmarshal(raw, &single); err == nil && strings.TrimSpace(single.URL) != "" {
+		if single.Index == 0 {
+			single.Index = 1
+		}
+		return []endpointCandidateView{single}, nil
+	}
+	var array []endpointCandidateView
+	if err := json.Unmarshal(raw, &array); err == nil && len(array) > 0 {
+		return normalizeEndpointCandidateIndexes(array), nil
+	}
+	var view endpointDiscoveryView
+	if err := json.Unmarshal(raw, &view); err != nil {
+		return nil, fmt.Errorf("fluxplane-plugin: endpoint import input must be JSON: %w", err)
+	}
+	if len(view.Result) > 0 {
+		fromResult, err := endpointCandidatesFromImport(view.Result)
+		if err == nil && len(fromResult) > 0 {
+			return normalizeEndpointCandidateIndexes(fromResult), nil
+		}
+	}
+	out := append([]endpointCandidateView(nil), view.Candidates...)
+	if len(out) == 0 {
+		for _, result := range view.Results {
+			out = append(out, result.Candidates...)
+		}
+	}
+	return normalizeEndpointCandidateIndexes(out), nil
+}
+
+func normalizeEndpointCandidateIndexes(in []endpointCandidateView) []endpointCandidateView {
+	seen := map[int]bool{}
+	for i := range in {
+		if in[i].Index == 0 || seen[in[i].Index] {
+			in[i].Index = i + 1
+		}
+		seen[in[i].Index] = true
+	}
+	return in
+}
+
+type endpointTestResult struct {
+	ID         string         `json:"id"`
+	URL        string         `json:"url,omitempty"`
+	Product    string         `json:"product,omitempty"`
+	Protocol   string         `json:"protocol,omitempty"`
+	OK         bool           `json:"ok"`
+	CheckedAt  time.Time      `json:"checked_at"`
+	Method     string         `json:"method,omitempty"`
+	DurationMS int64          `json:"duration_ms,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Details    map[string]any `json:"details,omitempty"`
+}
+
+type endpointDoctorResult struct {
+	Product   string               `json:"product,omitempty"`
+	Count     int                  `json:"count"`
+	OK        int                  `json:"ok"`
+	Failed    int                  `json:"failed"`
+	Endpoints []endpointTestResult `json:"endpoints,omitempty"`
+}
+
+func doctorEndpoints(ctx context.Context, backend management.Backend, instance, product string) (endpointDoctorResult, error) {
+	listed, err := backend.ListEndpoints(ctx, management.EndpointListRequest{Product: product})
+	if err != nil {
+		return endpointDoctorResult{}, err
+	}
+	records := endpointRecordsFromList(listed)
+	result := endpointDoctorResult{Product: product, Count: len(records)}
+	for _, record := range records {
+		testResult := testEndpoint(ctx, backend, instance, record)
+		if _, err := backend.SaveEndpointHealth(ctx, management.EndpointHealthRequest{ID: record.ID, Health: endpointHealthFromTestResult(testResult)}); err != nil {
+			return endpointDoctorResult{}, err
+		}
+		result.Endpoints = append(result.Endpoints, testResult)
+		if testResult.OK {
+			result.OK++
+		} else {
+			result.Failed++
+		}
+	}
+	return result, nil
+}
+
+func endpointRecordsFromList(listed management.EndpointListResult) []fpendpoint.Record {
+	if len(listed.Records) > 0 {
+		return append([]fpendpoint.Record(nil), listed.Records...)
+	}
+	records := make([]fpendpoint.Record, 0, len(listed.Endpoints))
+	for _, endpoint := range listed.Endpoints {
+		records = append(records, fpendpoint.Record{EndpointRef: endpoint})
+	}
+	return records
+}
+
+func testEndpoint(ctx context.Context, backend management.Backend, instance string, endpoint fpendpoint.Record) endpointTestResult {
+	if isKubernetesEndpoint(endpoint) {
+		return testPluginEndpoint(ctx, backend, endpoint, management.Ref{Name: "kubernetes"}, instance, "kubernetes.cluster.test", map[string]any{"endpoint_ref": endpoint.ID}, "kubernetes cluster test failed")
+	}
+	if isSQLEndpoint(endpoint) {
+		return testPluginEndpoint(ctx, backend, endpoint, management.Ref{Name: "sql"}, instance, "sql.query", map[string]any{
+			"endpoint_ref": endpoint.ID,
+			"query":        "select 1 as ok",
+			"max_rows":     1,
+		}, "sql endpoint test failed")
+	}
+	return testTCPEndpoint(ctx, endpoint)
+}
+
+func testPluginEndpoint(ctx context.Context, backend management.Backend, endpoint fpendpoint.Record, ref management.Ref, instance, operation string, input map[string]any, defaultError string) endpointTestResult {
+	start := time.Now()
+	result := endpointTestResult{
+		ID:        endpoint.ID,
+		URL:       redactEndpointURL(endpoint.URL),
+		Product:   endpoint.Product,
+		Protocol:  endpoint.Protocol,
+		CheckedAt: time.Now().UTC(),
+		Method:    operation,
+	}
+	inputRaw, err := json.Marshal(input)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	resp, err := backend.InvokeOperation(ctx, management.OperationInvokeRequest{
+		Ref:       ref,
+		Instance:  instance,
+		Operation: operation,
+		Input:     inputRaw,
+	})
+	result.DurationMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	var details map[string]any
+	if len(resp.Result) > 0 {
+		if err := json.Unmarshal(resp.Result, &details); err != nil {
+			result.Error = fmt.Sprintf("%s: decode result: %v", defaultError, err)
+			return result
+		}
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	delete(details, "rows")
+	if rawURL, _ := details["endpoint_url"].(string); rawURL != "" {
+		details["endpoint_url"] = redactEndpointURL(rawURL)
+	}
+	result.OK = true
+	result.Details = details
+	return result
+}
+
+func testTCPEndpoint(ctx context.Context, endpoint fpendpoint.Record) endpointTestResult {
+	start := time.Now()
+	result := endpointTestResult{
+		ID:        endpoint.ID,
+		URL:       redactEndpointURL(endpoint.URL),
+		Product:   endpoint.Product,
+		Protocol:  endpoint.Protocol,
+		CheckedAt: time.Now().UTC(),
+		Method:    "tcp_connect",
+	}
+	hostPort, err := endpointHostPort(endpoint.URL)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", hostPort)
+	result.DurationMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	_ = conn.Close()
+	result.OK = true
+	result.Details = map[string]any{"address": hostPort}
+	return result
+}
+
+func endpointHealthFromTestResult(result endpointTestResult) fpendpoint.Health {
+	return fpendpoint.Health{
+		OK:         result.OK,
+		CheckedAt:  result.CheckedAt,
+		Method:     result.Method,
+		DurationMS: result.DurationMS,
+		Error:      result.Error,
+		Details:    result.Details,
+	}
+}
+
+func isKubernetesEndpoint(endpoint fpendpoint.Record) bool {
+	values := []string{endpoint.Product, endpoint.Protocol}
+	if parsed, err := url.Parse(endpoint.URL); err == nil {
+		values = append(values, parsed.Scheme)
+	}
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "kubernetes", "k8s", "kube", "cluster":
+			return true
+		}
+	}
+	return false
+}
+
+func isSQLEndpoint(endpoint fpendpoint.Record) bool {
+	values := []string{endpoint.Product, endpoint.Protocol}
+	if parsed, err := url.Parse(endpoint.URL); err == nil {
+		values = append(values, parsed.Scheme)
+	}
+	for _, value := range values {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "mysql", "mariadb", "postgres", "postgresql", "pg", "sqlite":
+			return true
+		}
+	}
+	return false
+}
+
+func endpointHostPort(rawURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", err
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("endpoint url has no host")
+	}
+	if _, _, err := net.SplitHostPort(parsed.Host); err == nil {
+		return parsed.Host, nil
+	}
+	port := defaultEndpointPort(parsed.Scheme)
+	if port == "" {
+		return "", fmt.Errorf("endpoint url has no port")
+	}
+	return net.JoinHostPort(parsed.Hostname(), port), nil
+}
+
+func defaultEndpointPort(scheme string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "mysql", "mariadb":
+		return "3306"
+	case "postgres", "postgresql", "pg":
+		return "5432"
+	}
+	return ""
+}
+
+func redactEndpointURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User == nil {
+		return rawURL
+	}
+	username := parsed.User.Username()
+	if _, ok := parsed.User.Password(); ok {
+		parsed.User = url.UserPassword(username, "xxxxx")
+	} else {
+		parsed.User = url.User(username)
+	}
+	return parsed.String()
 }
 
 func newRunCommand(backend management.Backend) *cobra.Command {

@@ -9,10 +9,13 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/pluginbinding"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
 func TestBackendInstallListManifestRemove(t *testing.T) {
@@ -270,6 +273,21 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if len(methods.Methods) != 1 || methods.Methods[0].Name != "token" {
 		t.Fatalf("methods = %#v", methods)
 	}
+	t.Setenv("FLUXPLANE_TEST_ACCESS_TOKEN", "env-secret")
+	autoConnected, err := backend.AuthAuto(context.Background(), management.AuthAutoRequest{Ref: ref, Instance: "env"})
+	if err != nil {
+		t.Fatalf("AuthAuto: %v", err)
+	}
+	if !autoConnected.Changed || len(autoConnected.Saved) != 1 || autoConnected.Saved[0] != "access_token" || len(autoConnected.Missing) != 0 {
+		t.Fatalf("auto connected = %#v", autoConnected)
+	}
+	autoStatus, err := backend.AuthStatus(context.Background(), management.AuthStatusRequest{Ref: ref, Instance: "env"})
+	if err != nil {
+		t.Fatalf("AuthStatus auto: %v", err)
+	}
+	if len(autoStatus.Auth) != 1 || autoStatus.Auth[0].Metadata["access_token"] != "env-secret" {
+		t.Fatalf("auto status = %#v", autoStatus)
+	}
 	connected, err := backend.AuthConnect(context.Background(), management.AuthConnectRequest{Ref: ref, Method: "token", Metadata: map[string]string{"access_token": "secret"}})
 	if err != nil {
 		t.Fatalf("AuthConnect: %v", err)
@@ -289,7 +307,7 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListOperations: %v", err)
 	}
-	if len(operations.Operations) != 1 || operations.Operations[0].Name != "test.hello" {
+	if !hasOperation(operations.Operations, "test.hello") {
 		t.Fatalf("operations = %#v", operations)
 	}
 	op, err := backend.InvokeOperation(context.Background(), management.OperationInvokeRequest{Ref: ref, Operation: "test.hello", Input: []byte(`{"name":"Ada"}`)})
@@ -302,6 +320,23 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	}
 	if opResult["message"] != "hello Ada" {
 		t.Fatalf("operation result = %#v", opResult)
+	}
+	batch, err := backend.BatchOperations(context.Background(), management.OperationBatchRequest{
+		Ref: ref,
+		Calls: []protocol.OperationCall{{
+			Name:  "test.hello",
+			Input: []byte(`{"name":"Ada"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BatchOperations: %v", err)
+	}
+	var batchResult protocol.OperationBatchResult
+	if err := json.Unmarshal(batch.Result, &batchResult); err != nil {
+		t.Fatalf("batch result JSON: %v", err)
+	}
+	if len(batchResult.Results) != 1 || !batchResult.Results[0].OK || batchResult.Results[0].ID != "1" {
+		t.Fatalf("batch result = %#v", batchResult)
 	}
 
 	datasources, err := backend.ListDatasources(context.Background(), management.DatasourceListRequest{Ref: ref})
@@ -322,6 +357,216 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if dsResult["count"].(float64) != 1 {
 		t.Fatalf("datasource result = %#v", dsResult)
 	}
+	listed, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Capability: "list", Input: []byte(`{"entity":"test.item","limit":2}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource list: %v", err)
+	}
+	var listResult map[string]any
+	if err := json.Unmarshal(listed.Result, &listResult); err != nil {
+		t.Fatalf("datasource list result JSON: %v", err)
+	}
+	if listResult["count"].(float64) != 2 {
+		t.Fatalf("datasource list result = %#v", listResult)
+	}
+	batchGet, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Capability: "batch_get", Input: []byte(`{"entity":"test.item","ids":["A","B"]}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource batch_get: %v", err)
+	}
+	var batchGetResult map[string]any
+	if err := json.Unmarshal(batchGet.Result, &batchGetResult); err != nil {
+		t.Fatalf("datasource batch_get result JSON: %v", err)
+	}
+	if batchGetResult["count"].(float64) != 2 {
+		t.Fatalf("datasource batch_get result = %#v", batchGetResult)
+	}
+
+	contexts, err := backend.ListContextProviders(context.Background(), management.ContextListRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListContextProviders: %v", err)
+	}
+	if len(contexts.Context) != 1 || contexts.Context[0].Name != "test.context" {
+		t.Fatalf("contexts = %#v", contexts)
+	}
+	contextResult, err := backend.BuildContext(context.Background(), management.ContextBuildRequest{Ref: ref, Query: "Ada", Kinds: []string{"text"}, Limit: 1})
+	if err != nil {
+		t.Fatalf("BuildContext: %v", err)
+	}
+	var built pluginbinding.ContextBuildResult
+	if err := json.Unmarshal(contextResult.Result, &built); err != nil {
+		t.Fatalf("context result JSON: %v", err)
+	}
+	if len(built.Blocks) != 1 || built.Blocks[0].Content != "context Ada" {
+		t.Fatalf("context result = %#v", built)
+	}
+	indexBuilt, err := backend.BuildIndex(context.Background(), management.IndexBuildRequest{Ref: ref, Instance: "work", Index: "test.items"})
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if !indexBuilt.Stored || indexBuilt.Index != "test.items" || indexBuilt.Records != 2 {
+		t.Fatalf("index built = %#v", indexBuilt)
+	}
+	indexStatus, err := backend.IndexStatus(context.Background(), management.IndexStatusRequest{Ref: ref, Instance: "work"})
+	if err != nil {
+		t.Fatalf("IndexStatus: %v", err)
+	}
+	if len(indexStatus.Indexes) != 1 || indexStatus.Indexes[0].Records != 2 || len(indexStatus.Indexes[0].Details) != 1 {
+		t.Fatalf("index status = %#v", indexStatus)
+	}
+	if indexStatus.Indexes[0].Details[0].Index != "test.items" {
+		t.Fatalf("index status details = %#v", indexStatus.Indexes[0].Details)
+	}
+	indexedSearch, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "search", Input: []byte(`{"datasource":"test.items","query":"A","entity":"test.item"}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource indexed search: %v", err)
+	}
+	var indexedSearchResult struct {
+		Count   int `json:"count"`
+		Records []struct {
+			Entity string `json:"entity"`
+			ID     string `json:"id"`
+			Origin struct {
+				Source string `json:"source"`
+				Plugin string `json:"plugin"`
+				Index  string `json:"index"`
+			} `json:"origin"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(indexedSearch.Result, &indexedSearchResult); err != nil {
+		t.Fatalf("indexed search JSON: %v", err)
+	}
+	if indexedSearchResult.Count != 1 || indexedSearchResult.Records[0].ID != "A" || indexedSearchResult.Records[0].Origin.Source != "host_index" {
+		t.Fatalf("indexed search = %#v", indexedSearchResult)
+	}
+	indexedLookup, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "lookup", Input: []byte(`{"text":"open item B","entity":"test.item","limit":1}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource indexed lookup: %v", err)
+	}
+	var indexedLookupResult struct {
+		Count   int `json:"count"`
+		Matches []struct {
+			ID     string `json:"id"`
+			Source struct {
+				Source string `json:"source"`
+				Plugin string `json:"plugin"`
+				Index  string `json:"index"`
+			} `json:"source"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(indexedLookup.Result, &indexedLookupResult); err != nil {
+		t.Fatalf("indexed lookup JSON: %v", err)
+	}
+	if indexedLookupResult.Count != 1 || indexedLookupResult.Matches[0].ID != "B" || indexedLookupResult.Matches[0].Source.Source != "host_index" {
+		t.Fatalf("indexed lookup = %#v", indexedLookupResult)
+	}
+	indexedGet, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "get", Input: []byte(`{"datasource":"test.items","entity":"test.item","id":"B"}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource indexed get: %v", err)
+	}
+	var indexedGetResult struct {
+		Record struct {
+			Entity string `json:"entity"`
+			ID     string `json:"id"`
+			Origin struct {
+				Source string `json:"source"`
+				Plugin string `json:"plugin"`
+				Index  string `json:"index"`
+			} `json:"origin"`
+		} `json:"record"`
+	}
+	if err := json.Unmarshal(indexedGet.Result, &indexedGetResult); err != nil {
+		t.Fatalf("indexed get JSON: %v", err)
+	}
+	if indexedGetResult.Record.ID != "B" || indexedGetResult.Record.Origin.Index != "test.items" {
+		t.Fatalf("indexed get = %#v", indexedGetResult)
+	}
+	discovered, err := backend.DiscoverEndpoints(context.Background(), management.EndpointDiscoverRequest{Ref: ref, Product: "test", Namespace: "dev", Limit: 1})
+	if err != nil {
+		t.Fatalf("DiscoverEndpoints: %v", err)
+	}
+	var endpointResult map[string]any
+	if err := json.Unmarshal(discovered.Result, &endpointResult); err != nil {
+		t.Fatalf("endpoint result JSON: %v", err)
+	}
+	candidates, ok := endpointResult["candidates"].([]any)
+	if !ok || len(candidates) != 1 {
+		t.Fatalf("endpoint result = %#v", endpointResult)
+	}
+
+	saved, err := backend.SaveEndpoint(context.Background(), management.EndpointSaveRequest{Endpoint: fpendpoint.EndpointRef{
+		ID:       "test-endpoint",
+		Product:  "test",
+		Protocol: "http",
+		Source:   "manual",
+		URL:      "http://example.test/",
+		Labels:   map[string]string{"env": "test"},
+	}})
+	if err != nil {
+		t.Fatalf("SaveEndpoint: %v", err)
+	}
+	if !saved.Saved || saved.Updated || saved.Endpoint.URL != "http://example.test" {
+		t.Fatalf("saved = %#v", saved)
+	}
+	listedEndpoints, err := backend.ListEndpoints(context.Background(), management.EndpointListRequest{Product: "test"})
+	if err != nil {
+		t.Fatalf("ListEndpoints: %v", err)
+	}
+	if len(listedEndpoints.Endpoints) != 1 || listedEndpoints.Endpoints[0].ID != "test-endpoint" {
+		t.Fatalf("listed endpoints = %#v", listedEndpoints)
+	}
+	if len(listedEndpoints.Records) != 1 || listedEndpoints.Records[0].ID != "test-endpoint" || listedEndpoints.Records[0].CreatedAt.IsZero() {
+		t.Fatalf("listed endpoint records = %#v", listedEndpoints.Records)
+	}
+	got, err := backend.GetEndpoint(context.Background(), management.EndpointGetRequest{ID: "@endpoint/test-endpoint"})
+	if err != nil {
+		t.Fatalf("GetEndpoint: %v", err)
+	}
+	if !got.Found || got.Endpoint.ID != "test-endpoint" || got.Endpoint.URL != "http://example.test" {
+		t.Fatalf("got endpoint = %#v", got)
+	}
+	checkedAt := time.Date(2026, 6, 3, 1, 2, 3, 0, time.UTC)
+	health, err := backend.SaveEndpointHealth(context.Background(), management.EndpointHealthRequest{
+		ID: "@endpoint/test-endpoint",
+		Health: fpendpoint.Health{
+			OK:         true,
+			CheckedAt:  checkedAt,
+			Method:     "tcp_connect",
+			DurationMS: 42,
+			Details:    map[string]any{"address": "example.test:80"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveEndpointHealth: %v", err)
+	}
+	if !health.Saved || health.Record.LastHealth == nil || !health.Record.LastHealth.OK || health.Record.LastHealth.Method != "tcp_connect" {
+		t.Fatalf("health = %#v", health)
+	}
+	updatedEndpoint, err := backend.SaveEndpoint(context.Background(), management.EndpointSaveRequest{Endpoint: fpendpoint.EndpointRef{
+		ID:       "test-endpoint",
+		Product:  "test",
+		Protocol: "http",
+		Source:   "manual",
+		URL:      "http://example.test:8080",
+	}})
+	if err != nil {
+		t.Fatalf("SaveEndpoint update: %v", err)
+	}
+	if !updatedEndpoint.Updated || updatedEndpoint.Record.LastHealth == nil || updatedEndpoint.Record.LastHealth.DurationMS != 42 {
+		t.Fatalf("updated endpoint = %#v", updatedEndpoint)
+	}
+	removed, err := backend.RemoveEndpoint(context.Background(), management.EndpointRemoveRequest{ID: "test-endpoint"})
+	if err != nil {
+		t.Fatalf("RemoveEndpoint: %v", err)
+	}
+	if !removed.Removed || removed.ID != "test-endpoint" {
+		t.Fatalf("removed = %#v", removed)
+	}
+	empty, err := backend.ListEndpoints(context.Background(), management.EndpointListRequest{Product: "test"})
+	if err != nil {
+		t.Fatalf("ListEndpoints after remove: %v", err)
+	}
+	if len(empty.Endpoints) != 0 {
+		t.Fatalf("endpoints after remove = %#v", empty)
+	}
 }
 
 func TestRuntimePluginHelper(t *testing.T) {
@@ -340,6 +585,15 @@ func testRuntimeSpec() management.RuntimeSpec {
 	}
 }
 
+func hasOperation(operations []sdkmanifest.OperationSpec, name string) bool {
+	for _, operation := range operations {
+		if operation.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func testRuntimePlugin() *pluginbinding.Plugin {
 	type helloInput struct {
 		Name string `json:"name,omitempty"`
@@ -355,8 +609,30 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 		Records []pluginbinding.DatasourceRecord `json:"records"`
 		Count   int                              `json:"count"`
 	}
-	datasourceSpec := pluginbinding.TypedDatasourceSpec[searchInput, searchOutput]("test.items", "test.item", "Test items.", []string{pluginbinding.CapabilitySearch})
-	return pluginbinding.Define(pluginbinding.ManifestSpec{
+	type listInput struct {
+		Entity string `json:"entity,omitempty"`
+		Limit  int    `json:"limit,omitempty"`
+	}
+	type listOutput struct {
+		Records []pluginbinding.DatasourceRecord `json:"records"`
+		Count   int                              `json:"count"`
+	}
+	type batchGetInput struct {
+		Entity string   `json:"entity,omitempty"`
+		IDs    []string `json:"ids,omitempty"`
+	}
+	type batchGetOutput struct {
+		Records []pluginbinding.DatasourceRecord `json:"records"`
+		Count   int                              `json:"count"`
+	}
+	datasourceSpec := pluginbinding.TypedDatasourceSpec[searchInput, searchOutput](
+		"test.items",
+		"test.item",
+		"Test items.",
+		[]string{pluginbinding.CapabilitySearch, pluginbinding.CapabilityList, pluginbinding.CapabilityBatchGet, pluginbinding.CapabilityGet, pluginbinding.CapabilityLookup, pluginbinding.CapabilityIndex},
+	)
+	contextSpec := pluginbinding.ContextSpec("test.context", "Test context.", pluginbinding.ContextKindText)
+	plugin := pluginbinding.Define(pluginbinding.ManifestSpec{
 		Name: "test",
 		Auth: []sdkmanifest.AuthMethod{{
 			Name: "token",
@@ -364,19 +640,77 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 				Name:      "access_token",
 				Required:  true,
 				Sensitive: true,
+				Env:       []string{"FLUXPLANE_TEST_ACCESS_TOKEN"},
 			}},
 		}},
 		Datasources: []sdkmanifest.DatasourceSpec{datasourceSpec},
+		Context:     []sdkmanifest.ContextSpec{contextSpec},
 	},
 		pluginbinding.WithAuthConnectText("connected"),
 		pluginbinding.WithHostManagedAuthTest("test"),
+		pluginbinding.WithIndexBuildOperation("test.index.build"),
 		pluginbinding.RegisterOperation(pluginbinding.TypedOperationSpec[helloInput, helloOutput]("test.hello", "Say hello."),
 			func(_ pluginbinding.Context, input helloInput) (helloOutput, error) {
 				return helloOutput{Message: "hello " + input.Name}, nil
+			}),
+		pluginbinding.RegisterOperation(pluginbinding.TypedOperationSpec[pluginbinding.IndexBuildInput, pluginbinding.IndexBuildResult]("test.index.build", "Build test indexes."),
+			func(ctx pluginbinding.Context, input pluginbinding.IndexBuildInput) (pluginbinding.IndexBuildResult, error) {
+				selector, err := pluginbinding.NewIndexSelector(pluginbinding.InputMap(input), map[string]string{"test.items": "test.items", "test.item": "test.items"}, "test")
+				if err != nil {
+					return pluginbinding.IndexBuildResult{}, err
+				}
+				var records []pluginbinding.DatasourceRecord
+				if selector.Includes("test.items") {
+					records = []pluginbinding.DatasourceRecord{
+						pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", "A"),
+						pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", "B"),
+					}
+				}
+				return pluginbinding.NewIndexBuildResult(pluginbinding.NewIndexResult("test.items", records, map[string]any{"entity": "test.item"})), nil
 			}),
 		pluginbinding.RegisterDatasourceSearch(datasourceSpec, func(ctx pluginbinding.Context, input searchInput) (searchOutput, error) {
 			record := pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", input.Query)
 			return searchOutput{Records: []pluginbinding.DatasourceRecord{record}, Count: 1}, nil
 		}),
+		pluginbinding.RegisterDatasourceList(datasourceSpec, func(ctx pluginbinding.Context, input listInput) (listOutput, error) {
+			limit := input.Limit
+			if limit <= 0 {
+				limit = 1
+			}
+			records := make([]pluginbinding.DatasourceRecord, 0, limit)
+			for i := 0; i < limit; i++ {
+				records = append(records, pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", string(rune('A'+i))))
+			}
+			return listOutput{Records: records, Count: len(records)}, nil
+		}),
+		pluginbinding.RegisterDatasourceBatchGet(datasourceSpec, func(ctx pluginbinding.Context, input batchGetInput) (batchGetOutput, error) {
+			records := make([]pluginbinding.DatasourceRecord, 0, len(input.IDs))
+			for _, id := range input.IDs {
+				records = append(records, pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", id))
+			}
+			return batchGetOutput{Records: records, Count: len(records)}, nil
+		}),
+		pluginbinding.RegisterContextProvider(contextSpec, func(_ pluginbinding.Context, input pluginbinding.ContextBuildInput) (pluginbinding.ContextBuildResult, error) {
+			return pluginbinding.ContextBuildResult{Blocks: []sdkmanifest.ContextBlock{{
+				ID:      "test",
+				Content: "context " + input.Query,
+			}}}, nil
+		}),
 	)
+	plugin.Command(protocol.CommandEndpointsDiscover, func(ctx pluginbinding.Context) protocol.Response {
+		var input struct {
+			Product   string `json:"product,omitempty"`
+			Namespace string `json:"namespace,omitempty"`
+		}
+		if len(ctx.Request.Payload) > 0 {
+			_ = json.Unmarshal(ctx.Request.Payload, &input)
+		}
+		return protocol.OK(map[string]any{"candidates": []map[string]any{{
+			"id":        "test-endpoint",
+			"product":   input.Product,
+			"namespace": input.Namespace,
+			"url":       "https://example.test",
+		}}})
+	})
+	return plugin
 }

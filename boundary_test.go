@@ -47,3 +47,20 @@ func TestSDKDoesNotImportCoreDexOrPluginsRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSDKGoModDoesNotDependOnCoreDexOrPluginsRegistry(t *testing.T) {
+	raw, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	for _, forbidden := range []string{
+		"github.com/fluxplane/fluxplane-" + "core",
+		"github.com/fluxplane/fluxplane-" + "dex",
+		"github.com/fluxplane/fluxplane-" + "plugins",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("go.mod contains forbidden dependency %s", forbidden)
+		}
+	}
+}

@@ -7,6 +7,7 @@ const (
 	CapabilityBlobRead  = sdkhost.CapabilityBlobRead
 	CapabilityBlobWrite = sdkhost.CapabilityBlobWrite
 	CapabilityEnvLookup = sdkhost.CapabilityEnvLookup
+	CapabilityProcess   = sdkhost.CapabilityProcess
 	CapabilityProvider  = sdkhost.CapabilityProvider
 )
 
@@ -20,5 +21,7 @@ type BlobWriteRequest = sdkhost.BlobWriteRequest
 type BlobInfoRequest = sdkhost.BlobInfoRequest
 type EnvLookupRequest = sdkhost.EnvLookupRequest
 type EnvLookupResponse = sdkhost.EnvLookupResponse
+type ProcessRunRequest = sdkhost.ProcessRunRequest
+type ProcessRunResponse = sdkhost.ProcessRunResponse
 type ProviderCallRequest = sdkhost.ProviderCallRequest
 type ProviderCallResponse = sdkhost.ProviderCallResponse

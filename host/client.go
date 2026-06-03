@@ -31,6 +31,7 @@ type Client interface {
 	BlobWrite(input BlobWriteRequest) (BlobRef, error)
 	BlobInfo(input BlobInfoRequest) (BlobRef, error)
 	EnvLookup(key string) (EnvLookupResponse, error)
+	ProcessRun(input ProcessRunRequest) (ProcessRunResponse, error)
 	CapabilityCall(input ProviderCallRequest) (ProviderCallResponse, error)
 }
 
@@ -111,6 +112,12 @@ func (h client) EnvLookup(key string) (EnvLookupResponse, error) {
 	return out, err
 }
 
+func (h client) ProcessRun(input ProcessRunRequest) (ProcessRunResponse, error) {
+	var out ProcessRunResponse
+	err := h.call(protocol.HostCapabilityProcessRun, input, &out)
+	return out, err
+}
+
 func (h client) CapabilityCall(input ProviderCallRequest) (ProviderCallResponse, error) {
 	var out ProviderCallResponse
 	err := h.call(protocol.HostCapabilityProviderCall, input, &out)
@@ -166,6 +173,10 @@ func (unavailableClient) BlobInfo(BlobInfoRequest) (BlobRef, error) {
 
 func (unavailableClient) EnvLookup(string) (EnvLookupResponse, error) {
 	return EnvLookupResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ProcessRun(ProcessRunRequest) (ProcessRunResponse, error) {
+	return ProcessRunResponse{}, fmt.Errorf("host client is unavailable")
 }
 
 func (unavailableClient) CapabilityCall(ProviderCallRequest) (ProviderCallResponse, error) {

@@ -174,12 +174,11 @@ func (p DirectPlugin) Name() string {
 }
 
 func (p DirectPlugin) Invoke(ctx context.Context, req protocol.Request, caller protocol.HostCaller) (protocol.Response, error) {
-	_ = ctx
 	if p.Plugin == nil {
 		return protocol.Response{}, fmt.Errorf("pluginruntime: direct plugin is nil")
 	}
 	req = normalizeRequest(req, p.Name(), protocol.Version)
-	return p.Plugin.HandleWithHostAndEvents(req, sdkhost.NewClient(caller), callerEventSink{caller: caller}), nil
+	return p.Plugin.HandleWithContextHostAndEvents(ctx, req, sdkhost.NewClient(caller), callerEventSink{caller: caller}), nil
 }
 
 type StdioPlugin struct {
