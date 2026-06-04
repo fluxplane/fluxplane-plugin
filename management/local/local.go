@@ -1285,6 +1285,12 @@ func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) 
 			return nil, err
 		}
 		return json.Marshal(sdkhost.SecretMaterial{Purpose: strings.TrimSpace(req.Purpose), Value: value})
+	case sdkhost.IndexLookupCommand:
+		return h.indexLookup(payload)
+	case sdkhost.IndexSearchCommand:
+		return h.indexSearch(payload)
+	case sdkhost.IndexGetCommand:
+		return h.indexGet(payload)
 	case protocol.HostCapabilityHTTPDo:
 		return h.httpDo(payload)
 	case sdkhost.EndpointResolve:

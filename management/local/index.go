@@ -219,6 +219,63 @@ func (b *Backend) callIndexedDatasource(plugin storedPlugin, instance, command s
 	}
 }
 
+func (h cliHost) indexLookup(payload any) (json.RawMessage, error) {
+	var input sdkdatasource.LookupInput
+	if err := decodeHostPayload(payload, &input); err != nil {
+		return nil, err
+	}
+	snapshots, err := h.backend.loadIndexSnapshots(management.Ref{Name: h.plugin}, normalizeInstance(h.instance))
+	if err != nil {
+		return nil, err
+	}
+	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
+	if !handled {
+		selected = nil
+	}
+	matches := lookupIndexRecords(selected, input)
+	result := sdkdatasource.NewLookupResult("host_index", input.Text, sdkdatasource.LookupTerms(input), matches)
+	return json.Marshal(result)
+}
+
+func (h cliHost) indexSearch(payload any) (json.RawMessage, error) {
+	var input sdkdatasource.SearchInput
+	if err := decodeHostPayload(payload, &input); err != nil {
+		return nil, err
+	}
+	snapshots, err := h.backend.loadIndexSnapshots(management.Ref{Name: h.plugin}, normalizeInstance(h.instance))
+	if err != nil {
+		return nil, err
+	}
+	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
+	if !handled {
+		selected = nil
+	}
+	records := searchIndexRecords(selected, input)
+	result := sdkdatasource.NewSearchResult("host_index", input.Query, records)
+	return json.Marshal(result)
+}
+
+func (h cliHost) indexGet(payload any) (json.RawMessage, error) {
+	var input sdkdatasource.GetInput
+	if err := decodeHostPayload(payload, &input); err != nil {
+		return nil, err
+	}
+	snapshots, err := h.backend.loadIndexSnapshots(management.Ref{Name: h.plugin}, normalizeInstance(h.instance))
+	if err != nil {
+		return nil, err
+	}
+	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
+	if !handled {
+		selected = nil
+	}
+	record, ok := getIndexRecord(selected, input)
+	if !ok {
+		return nil, fmt.Errorf("indexed record %q not found", input.ID)
+	}
+	result := sdkdatasource.NewGetResult("host_index", record)
+	return json.Marshal(result)
+}
+
 func (b *Backend) decodeIndexBuildResults(ctx context.Context, plugin storedPlugin, instance string, raw json.RawMessage) ([]indexSnapshot, error) {
 	var result struct {
 		Index   string          `json:"index,omitempty"`

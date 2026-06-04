@@ -627,6 +627,60 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if indexedBatchGetResult.Source != "host_index" || indexedBatchGetResult.Count != 1 || indexedBatchGetResult.Records[0].ID != "B" || indexedBatchGetResult.Records[0].Origin.Index != "test.items" || len(indexedBatchGetResult.Errors) != 1 || indexedBatchGetResult.Errors[0].ID != "missing" {
 		t.Fatalf("indexed batch_get = %#v", indexedBatchGetResult)
 	}
+	host := cliHost{backend: backend, plugin: ref.Name, instance: "work"}
+	hostLookup, err := host.CallHost(sdkhost.IndexLookupCommand, pluginbinding.DatasourceLookupInput{Text: "open item B", Entity: "test.item", Limit: 1})
+	if err != nil {
+		t.Fatalf("host index lookup: %v", err)
+	}
+	var hostLookupResult struct {
+		Source  string `json:"source"`
+		Count   int    `json:"count"`
+		Matches []struct {
+			ID     string `json:"id"`
+			Source struct {
+				Index string `json:"index"`
+			} `json:"source"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(hostLookup, &hostLookupResult); err != nil {
+		t.Fatalf("host index lookup JSON: %v", err)
+	}
+	if hostLookupResult.Source != "host_index" || hostLookupResult.Count != 1 || hostLookupResult.Matches[0].ID != "B" || hostLookupResult.Matches[0].Source.Index != "test.items" {
+		t.Fatalf("host index lookup = %#v", hostLookupResult)
+	}
+	hostSearch, err := host.CallHost(sdkhost.IndexSearchCommand, pluginbinding.DatasourceSearchInput{Query: "A", Entity: "test.item", Limit: 1})
+	if err != nil {
+		t.Fatalf("host index search: %v", err)
+	}
+	var hostSearchResult struct {
+		Source  string `json:"source"`
+		Count   int    `json:"count"`
+		Records []struct {
+			ID string `json:"id"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(hostSearch, &hostSearchResult); err != nil {
+		t.Fatalf("host index search JSON: %v", err)
+	}
+	if hostSearchResult.Source != "host_index" || hostSearchResult.Count != 1 || hostSearchResult.Records[0].ID != "A" {
+		t.Fatalf("host index search = %#v", hostSearchResult)
+	}
+	hostGet, err := host.CallHost(sdkhost.IndexGetCommand, pluginbinding.DatasourceGetInput{Datasource: "test.items", Entity: "test.item", ID: "A"})
+	if err != nil {
+		t.Fatalf("host index get: %v", err)
+	}
+	var hostGetResult struct {
+		Source string `json:"source"`
+		Record struct {
+			ID string `json:"id"`
+		} `json:"record"`
+	}
+	if err := json.Unmarshal(hostGet, &hostGetResult); err != nil {
+		t.Fatalf("host index get JSON: %v", err)
+	}
+	if hostGetResult.Source != "host_index" || hostGetResult.Record.ID != "A" {
+		t.Fatalf("host index get = %#v", hostGetResult)
+	}
 	discovered, err := backend.DiscoverEndpoints(context.Background(), management.EndpointDiscoverRequest{Ref: ref, Product: "test", Namespace: "dev", Limit: 1})
 	if err != nil {
 		t.Fatalf("DiscoverEndpoints: %v", err)
