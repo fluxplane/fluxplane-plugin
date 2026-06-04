@@ -39,6 +39,26 @@ type indexRecord struct {
 	Record        json.RawMessage            `json:"record,omitempty"`
 }
 
+type indexListInput struct {
+	Datasource string            `json:"datasource,omitempty"`
+	Entity     string            `json:"entity,omitempty"`
+	Query      string            `json:"query,omitempty"`
+	Text       string            `json:"text,omitempty"`
+	Limit      int               `json:"limit,omitempty"`
+	Filters    map[string]string `json:"filters,omitempty"`
+}
+
+type indexBatchGetInput struct {
+	Datasource string   `json:"datasource,omitempty"`
+	Entity     string   `json:"entity,omitempty"`
+	IDs        []string `json:"ids,omitempty"`
+}
+
+type indexDatasourceError struct {
+	ID      string `json:"id,omitempty"`
+	Message string `json:"message"`
+}
+
 // BuildIndex asks the plugin runtime to build index records and stores them locally.
 func (b *Backend) BuildIndex(ctx context.Context, req management.IndexBuildRequest) (management.IndexBuildResult, error) {
 	plugin, err := b.installedPlugin(req.Ref)
@@ -143,6 +163,20 @@ func (b *Backend) callIndexedDatasource(plugin storedPlugin, instance, command s
 		result := sdkdatasource.NewLookupResult("host_index", options.Text, sdkdatasource.LookupTerms(options), matches)
 		raw, err := json.Marshal(result)
 		return raw, true, err
+	case protocol.CommandDatasourcesRecords:
+		options := decodeIndexListInput(input)
+		selected, handled := selectedIndexSnapshots(snapshots, options.Datasource, options.Entity)
+		if !handled {
+			return nil, false, nil
+		}
+		records := listIndexRecords(selected, options)
+		result := struct {
+			Source  string        `json:"source"`
+			Count   int           `json:"count"`
+			Records []indexRecord `json:"records"`
+		}{Source: "host_index", Count: len(records), Records: records}
+		raw, err := json.Marshal(result)
+		return raw, true, err
 	case protocol.CommandDatasourcesGet:
 		options := decodeIndexGetInput(input)
 		selected, handled := selectedIndexSnapshots(snapshots, options.Datasource, options.Entity)
@@ -157,6 +191,27 @@ func (b *Backend) callIndexedDatasource(plugin storedPlugin, instance, command s
 			return nil, true, fmt.Errorf("fluxplane-plugin: indexed record %q not found", options.ID)
 		}
 		result := sdkdatasource.NewGetResult("host_index", record)
+		raw, err := json.Marshal(result)
+		return raw, true, err
+	case protocol.CommandDatasourcesBatchGet:
+		options := decodeIndexBatchGetInput(input)
+		selected, handled := selectedIndexSnapshots(snapshots, options.Datasource, options.Entity)
+		if !handled {
+			return nil, false, nil
+		}
+		if len(options.IDs) == 0 {
+			return nil, true, fmt.Errorf("fluxplane-plugin: datasource batch_get requires ids")
+		}
+		records, missing := batchGetIndexRecords(selected, options)
+		result := struct {
+			Source  string                 `json:"source"`
+			Count   int                    `json:"count"`
+			Records []indexRecord          `json:"records"`
+			Errors  []indexDatasourceError `json:"errors,omitempty"`
+		}{Source: "host_index", Count: len(records), Records: records}
+		for _, id := range missing {
+			result.Errors = append(result.Errors, indexDatasourceError{ID: id, Message: "indexed record not found"})
+		}
 		raw, err := json.Marshal(result)
 		return raw, true, err
 	default:
@@ -351,6 +406,37 @@ func decodeIndexLookupInput(raw json.RawMessage) sdkdatasource.LookupInput {
 	return input
 }
 
+func decodeIndexListInput(raw json.RawMessage) indexListInput {
+	var input indexListInput
+	_ = json.Unmarshal(raw, &input)
+	var object map[string]any
+	_ = json.Unmarshal(raw, &object)
+	if input.Datasource == "" {
+		input.Datasource = firstInputString(object, "datasource", "index")
+	}
+	if input.Entity == "" {
+		input.Entity = firstInputString(object, "entity")
+	}
+	if input.Query == "" {
+		input.Query = firstInputString(object, "query", "q")
+	}
+	if input.Text == "" {
+		input.Text = firstInputString(object, "text")
+	}
+	if len(input.Filters) > 0 {
+		if input.Query == "" {
+			input.Query = strings.TrimSpace(input.Filters["query"])
+		}
+		if input.Query == "" {
+			input.Query = strings.TrimSpace(input.Filters["q"])
+		}
+		if input.Query == "" {
+			input.Query = strings.TrimSpace(input.Filters["text"])
+		}
+	}
+	return input
+}
+
 func decodeIndexGetInput(raw json.RawMessage) sdkdatasource.GetInput {
 	var input sdkdatasource.GetInput
 	_ = json.Unmarshal(raw, &input)
@@ -364,6 +450,25 @@ func decodeIndexGetInput(raw json.RawMessage) sdkdatasource.GetInput {
 	}
 	if input.Entity == "" {
 		input.Entity = firstInputString(object, "entity")
+	}
+	return input
+}
+
+func decodeIndexBatchGetInput(raw json.RawMessage) indexBatchGetInput {
+	var input indexBatchGetInput
+	_ = json.Unmarshal(raw, &input)
+	var object map[string]any
+	_ = json.Unmarshal(raw, &object)
+	if input.Datasource == "" {
+		input.Datasource = firstInputString(object, "datasource", "index")
+	}
+	if input.Entity == "" {
+		input.Entity = firstInputString(object, "entity")
+	}
+	if len(input.IDs) == 0 {
+		if id := firstInputString(object, "id", "ref", "key"); id != "" {
+			input.IDs = []string{id}
+		}
 	}
 	return input
 }
@@ -397,6 +502,36 @@ func searchIndexRecords(snapshots []indexSnapshot, options sdkdatasource.SearchI
 	sortIndexRecords(out)
 	if len(out) > limit {
 		out = out[:limit]
+	}
+	return out
+}
+
+func listIndexRecords(snapshots []indexSnapshot, options indexListInput) []indexRecord {
+	query := strings.TrimSpace(options.Query)
+	if query == "" {
+		query = strings.TrimSpace(options.Text)
+	}
+	if query != "" {
+		return searchIndexRecords(snapshots, sdkdatasource.SearchInput{Datasource: options.Datasource, Entity: options.Entity, Query: query, Limit: options.Limit})
+	}
+	entity := strings.TrimSpace(options.Entity)
+	limit := options.Limit
+	var out []indexRecord
+	for _, snapshot := range snapshots {
+		for _, raw := range snapshot.Records {
+			record, ok := normalizeIndexRecord(raw)
+			if !ok {
+				continue
+			}
+			record = enrichIndexRecord(snapshot, record)
+			if entity != "" && record.Entity != entity {
+				continue
+			}
+			out = append(out, record)
+			if limit > 0 && len(out) >= limit {
+				return out
+			}
+		}
 	}
 	return out
 }
@@ -443,6 +578,39 @@ func getIndexRecord(snapshots []indexSnapshot, options sdkdatasource.GetInput) (
 		}
 	}
 	return indexRecord{}, false
+}
+
+func batchGetIndexRecords(snapshots []indexSnapshot, options indexBatchGetInput) ([]indexRecord, []string) {
+	entity := strings.TrimSpace(options.Entity)
+	byID := map[string]indexRecord{}
+	for _, snapshot := range snapshots {
+		for _, raw := range snapshot.Records {
+			record, ok := normalizeIndexRecord(raw)
+			if !ok {
+				continue
+			}
+			record = enrichIndexRecord(snapshot, record)
+			if entity != "" && record.Entity != entity {
+				continue
+			}
+			byID[record.ID] = record
+		}
+	}
+	records := make([]indexRecord, 0, len(options.IDs))
+	var missing []string
+	for _, id := range options.IDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		record, ok := byID[id]
+		if !ok {
+			missing = append(missing, id)
+			continue
+		}
+		records = append(records, record)
+	}
+	return records, missing
 }
 
 func (b *Backend) indexDir() string {

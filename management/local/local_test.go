@@ -108,6 +108,53 @@ func TestCLIHostProcessRun(t *testing.T) {
 	}
 }
 
+func TestCLIHostBlobStore(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	host := cliHost{backend: backend, plugin: "slack", instance: "default"}
+	raw, err := host.CallHost(protocol.HostCapabilityBlobWrite, sdkhost.BlobWriteRequest{
+		Ref:       "download/test",
+		Content:   []byte("hello blob"),
+		Filename:  "hello.txt",
+		MediaType: "text/plain",
+		Metadata:  map[string]string{"source": "test"},
+	})
+	if err != nil {
+		t.Fatalf("BlobWrite: %v", err)
+	}
+	var written sdkhost.BlobRef
+	if err := json.Unmarshal(raw, &written); err != nil {
+		t.Fatalf("BlobWrite JSON: %v", err)
+	}
+	if written.Ref != "download/test" || written.Filename != "hello.txt" || written.Size != int64(len("hello blob")) {
+		t.Fatalf("written blob = %#v", written)
+	}
+	raw, err = host.CallHost(protocol.HostCapabilityBlobInfo, sdkhost.BlobInfoRequest{Ref: written.Ref})
+	if err != nil {
+		t.Fatalf("BlobInfo: %v", err)
+	}
+	var info sdkhost.BlobRef
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("BlobInfo JSON: %v", err)
+	}
+	if info.Ref != written.Ref || info.Size != written.Size {
+		t.Fatalf("blob info = %#v", info)
+	}
+	raw, err = host.CallHost(protocol.HostCapabilityBlobRead, sdkhost.BlobReadRequest{Ref: written.Ref, MaxBytes: 5})
+	if err != nil {
+		t.Fatalf("BlobRead: %v", err)
+	}
+	var read sdkhost.BlobReadResponse
+	if err := json.Unmarshal(raw, &read); err != nil {
+		t.Fatalf("BlobRead JSON: %v", err)
+	}
+	if string(read.Content) != "hello" || !read.Truncated || read.Blob.Ref != written.Ref {
+		t.Fatalf("blob read = %#v", read)
+	}
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -488,6 +535,29 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if indexedSearchResult.Count != 1 || indexedSearchResult.Records[0].ID != "A" || indexedSearchResult.Records[0].Origin.Source != "host_index" {
 		t.Fatalf("indexed search = %#v", indexedSearchResult)
 	}
+	indexedRecords, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "list", Input: []byte(`{"datasource":"test.items","entity":"test.item","limit":1}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource indexed records: %v", err)
+	}
+	var indexedRecordsResult struct {
+		Source  string `json:"source"`
+		Count   int    `json:"count"`
+		Records []struct {
+			Entity string `json:"entity"`
+			ID     string `json:"id"`
+			Origin struct {
+				Source string `json:"source"`
+				Plugin string `json:"plugin"`
+				Index  string `json:"index"`
+			} `json:"origin"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal(indexedRecords.Result, &indexedRecordsResult); err != nil {
+		t.Fatalf("indexed records JSON: %v", err)
+	}
+	if indexedRecordsResult.Source != "host_index" || indexedRecordsResult.Count != 1 || indexedRecordsResult.Records[0].Origin.Index != "test.items" {
+		t.Fatalf("indexed records = %#v", indexedRecordsResult)
+	}
 	indexedLookup, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "lookup", Input: []byte(`{"text":"open item B","entity":"test.item","limit":1}`)})
 	if err != nil {
 		t.Fatalf("CallDatasource indexed lookup: %v", err)
@@ -529,6 +599,33 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	}
 	if indexedGetResult.Record.ID != "B" || indexedGetResult.Record.Origin.Index != "test.items" {
 		t.Fatalf("indexed get = %#v", indexedGetResult)
+	}
+	indexedBatchGet, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "batch_get", Input: []byte(`{"datasource":"test.items","entity":"test.item","ids":["B","missing"]}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource indexed batch_get: %v", err)
+	}
+	var indexedBatchGetResult struct {
+		Source  string `json:"source"`
+		Count   int    `json:"count"`
+		Records []struct {
+			Entity string `json:"entity"`
+			ID     string `json:"id"`
+			Origin struct {
+				Source string `json:"source"`
+				Plugin string `json:"plugin"`
+				Index  string `json:"index"`
+			} `json:"origin"`
+		} `json:"records"`
+		Errors []struct {
+			ID      string `json:"id"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(indexedBatchGet.Result, &indexedBatchGetResult); err != nil {
+		t.Fatalf("indexed batch_get JSON: %v", err)
+	}
+	if indexedBatchGetResult.Source != "host_index" || indexedBatchGetResult.Count != 1 || indexedBatchGetResult.Records[0].ID != "B" || indexedBatchGetResult.Records[0].Origin.Index != "test.items" || len(indexedBatchGetResult.Errors) != 1 || indexedBatchGetResult.Errors[0].ID != "missing" {
+		t.Fatalf("indexed batch_get = %#v", indexedBatchGetResult)
 	}
 	discovered, err := backend.DiscoverEndpoints(context.Background(), management.EndpointDiscoverRequest{Ref: ref, Product: "test", Namespace: "dev", Limit: 1})
 	if err != nil {

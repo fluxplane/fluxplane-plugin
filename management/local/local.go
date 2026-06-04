@@ -1300,6 +1300,12 @@ func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) 
 		}
 		value, found := os.LookupEnv(strings.TrimSpace(req.Key))
 		return json.Marshal(sdkhost.EnvLookupResponse{Key: strings.TrimSpace(req.Key), Value: value, Found: found})
+	case protocol.HostCapabilityBlobRead:
+		return h.blobRead(payload)
+	case protocol.HostCapabilityBlobWrite:
+		return h.blobWrite(payload)
+	case protocol.HostCapabilityBlobInfo:
+		return h.blobInfo(payload)
 	case protocol.HostCapabilityProcessRun:
 		return h.processRun(payload)
 	case protocol.HostCapabilityProcessStart:
@@ -1326,6 +1332,159 @@ func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) 
 
 func (cliHost) EmitHostEvent(string, any) error {
 	return nil
+}
+
+func (h cliHost) blobRead(payload any) (json.RawMessage, error) {
+	var req sdkhost.BlobReadRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	ref := h.blobRef(req.Ref, req.Path)
+	blob, err := h.blobInfoForRef(ref)
+	if err != nil {
+		return nil, err
+	}
+	content, truncated, err := readBlobContent(blob.Path, req.MaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(sdkhost.BlobReadResponse{Blob: blob, Content: content, Truncated: truncated})
+}
+
+func (h cliHost) blobWrite(payload any) (json.RawMessage, error) {
+	var req sdkhost.BlobWriteRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	ref := h.blobRef(req.Ref, req.Path)
+	if ref == "" {
+		ref = "blob-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	path := h.blobContentPath(ref)
+	if !req.Overwrite {
+		if _, err := os.Stat(path); err == nil {
+			return nil, fmt.Errorf("blob %q already exists", ref)
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, append([]byte(nil), req.Content...), 0o600); err != nil {
+		return nil, err
+	}
+	blob := sdkhost.BlobRef{
+		Ref:       ref,
+		Path:      path,
+		MediaType: strings.TrimSpace(req.MediaType),
+		Filename:  strings.TrimSpace(req.Filename),
+		Size:      int64(len(req.Content)),
+		Metadata:  cloneStringMap(req.Metadata),
+	}
+	if err := h.saveBlobInfo(blob); err != nil {
+		return nil, err
+	}
+	return json.Marshal(blob)
+}
+
+func (h cliHost) blobInfo(payload any) (json.RawMessage, error) {
+	var req sdkhost.BlobInfoRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	blob, err := h.blobInfoForRef(h.blobRef(req.Ref, req.Path))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(blob)
+}
+
+func (h cliHost) blobRef(ref, path string) string {
+	ref = strings.TrimSpace(ref)
+	if ref != "" {
+		return ref
+	}
+	path = strings.TrimSpace(path)
+	if path != "" {
+		return path
+	}
+	return ""
+}
+
+func (h cliHost) blobDir() string {
+	return filepath.Join(filepath.Dir(h.backend.path), "blobs", pathSegment(h.plugin), pathSegment(normalizeInstance(h.instance)))
+}
+
+func (h cliHost) blobContentPath(ref string) string {
+	return filepath.Join(h.blobDir(), pathSegment(ref)+".bin")
+}
+
+func (h cliHost) blobInfoPath(ref string) string {
+	return filepath.Join(h.blobDir(), pathSegment(ref)+".json")
+}
+
+func (h cliHost) blobInfoForRef(ref string) (sdkhost.BlobRef, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return sdkhost.BlobRef{}, fmt.Errorf("blob ref or path is required")
+	}
+	path := h.blobInfoPath(ref)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sdkhost.BlobRef{}, fmt.Errorf("blob %q not found", ref)
+		}
+		return sdkhost.BlobRef{}, err
+	}
+	var blob sdkhost.BlobRef
+	if err := json.Unmarshal(data, &blob); err != nil {
+		return sdkhost.BlobRef{}, err
+	}
+	if strings.TrimSpace(blob.Ref) == "" {
+		blob.Ref = ref
+	}
+	if strings.TrimSpace(blob.Path) == "" {
+		blob.Path = h.blobContentPath(ref)
+	}
+	info, err := os.Stat(blob.Path)
+	if err == nil {
+		blob.Size = info.Size()
+	}
+	return blob, nil
+}
+
+func (h cliHost) saveBlobInfo(blob sdkhost.BlobRef) error {
+	path := h.blobInfoPath(blob.Ref)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(blob, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o600)
+}
+
+func readBlobContent(path string, maxBytes int64) ([]byte, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	if maxBytes <= 0 {
+		content, err := io.ReadAll(file)
+		return content, false, err
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(content)) <= maxBytes {
+		return content, false, nil
+	}
+	return content[:maxBytes], true, nil
 }
 
 func (h cliHost) processRun(payload any) (json.RawMessage, error) {
