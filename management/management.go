@@ -47,6 +47,10 @@ type InstallRequest struct {
 	Manifest    json.RawMessage   `json:"manifest,omitempty"`
 	ManifestRef string            `json:"manifest_ref,omitempty"`
 	DryRun      bool              `json:"dry_run,omitempty"`
+	// PreferRemote forces resolution from the marketplace go_install source
+	// even when a local_path is available, so an upgrade installs the published
+	// artifact rather than a local dev build.
+	PreferRemote bool `json:"prefer_remote,omitempty"`
 }
 
 // InstallResult describes an installed plugin artifact.

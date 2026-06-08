@@ -249,7 +249,7 @@ func (b *Backend) InstallPlugin(ctx context.Context, req management.InstallReque
 		if req.DryRun {
 			runtime = marketplaceRuntime(entry)
 		} else {
-			preparedRuntime, preparedLabels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry)
+			preparedRuntime, preparedLabels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, req.PreferRemote)
 			if err != nil {
 				return management.InstallResult{}, err
 			}
@@ -339,14 +339,21 @@ func (b *Backend) UpdatePlugin(ctx context.Context, req management.UpdateRequest
 			plugin.Runtime = marketplaceRuntime(entry)
 		} else {
 			oldPlugin := plugin
-			runtime, labels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry)
+			runtime, labels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, false)
 			if err != nil {
 				return management.UpdateResult{}, err
 			}
 			plugin.Runtime = runtime
 			plugin.Labels = mergeLabels(mergeLabels(marketplaceLabels(entry), plugin.Labels), labels)
-			if err := b.removeOwnedArtifact(oldPlugin); err != nil {
-				return management.UpdateResult{}, err
+			// Only remove the previous artifact when the rebuild produced a
+			// different path; the marketplace binary path is deterministic, so
+			// removing it after a same-path rebuild would delete the new binary.
+			oldPath := strings.TrimSpace(oldPlugin.Labels["installed_binary_path"])
+			newPath := strings.TrimSpace(plugin.Labels["installed_binary_path"])
+			if oldPath != "" && oldPath != newPath {
+				if err := b.removeOwnedArtifact(oldPlugin); err != nil {
+					return management.UpdateResult{}, err
+				}
 			}
 		}
 	}
@@ -480,10 +487,10 @@ func (b *Backend) SearchPlugins(ctx context.Context, req management.SearchReques
 		return management.SearchResult{}, err
 	}
 	query := strings.ToLower(strings.TrimSpace(req.Query))
+	// limit <= 0 means unlimited; the final truncation below only applies when
+	// a positive limit was requested. (Previously this defaulted to the count
+	// of installed plugins, silently truncating the full marketplace catalog.)
 	limit := req.Limit
-	if limit <= 0 {
-		limit = len(plugins)
-	}
 	byKey := map[string]management.Plugin{}
 	for _, plugin := range plugins {
 		if query != "" && !strings.Contains(strings.ToLower(plugin.Ref.Name), query) && !strings.Contains(strings.ToLower(plugin.Description), query) {
@@ -2688,11 +2695,11 @@ func marketplaceRuntime(entry sdkmanifest.PluginEntry) management.RuntimeSpec {
 	return management.RuntimeSpec{Kind: "stdio", Command: command, Path: localPath}
 }
 
-func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.Ref, entry sdkmanifest.PluginEntry) (management.RuntimeSpec, map[string]string, error) {
+func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.Ref, entry sdkmanifest.PluginEntry, preferRemote bool) (management.RuntimeSpec, map[string]string, error) {
 	binary := marketplaceBinaryName(ref, entry)
 	binPath := filepath.Join(b.binDir, executableName(binary))
 	localPath := strings.TrimSpace(entry.LocalPath)
-	if localPath != "" && strings.TrimSpace(entry.Binary) != "" {
+	if !preferRemote && localPath != "" && strings.TrimSpace(entry.Binary) != "" {
 		cmdDir := filepath.Join(localPath, "cmd", strings.TrimSpace(entry.Binary))
 		if info, err := os.Stat(cmdDir); err == nil && info.IsDir() {
 			if err := b.buildLocalMarketplaceBinary(ctx, localPath, strings.TrimSpace(entry.Binary), binPath); err != nil {

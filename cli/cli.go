@@ -43,6 +43,12 @@ func New(opts Options) *cobra.Command {
 		Use:          "fluxplane-plugin",
 		Short:        "Manage Fluxplane plugins",
 		SilenceUsage: true,
+		// Runs only when a command's RunE succeeded. Regenerates installed
+		// skills after state-changing commands so the skill never goes stale.
+		PersistentPostRunE: func(c *cobra.Command, _ []string) error {
+			refreshSkillsAfterStateChange(c, opts.Backend)
+			return nil
+		},
 	}
 	cmd.SetOut(out)
 	cmd.SetErr(errOut)
@@ -65,6 +71,8 @@ func New(opts Options) *cobra.Command {
 		newIndexCommand(opts.Backend),
 		newEndpointCommand(opts.Backend),
 		newRunCommand(opts.Backend),
+		newSkillCommand(opts.Backend),
+		newUpgradeCommand(opts.Backend),
 	)
 	return cmd
 }
@@ -338,27 +346,38 @@ func newInstallCommand(backend management.Backend) *cobra.Command {
 	var dryRun bool
 	var manifestPath string
 	var manifestRef string
+	var all bool
+	var remote bool
 	var runtime runtimeFlags
 	cmd := &cobra.Command{
-		Use:   "install PLUGIN[@VERSION]",
-		Short: "Install a plugin",
-		Args:  cobra.ExactArgs(1),
+		Use:   "install [PLUGIN[@VERSION]]",
+		Short: "Install a plugin (or all marketplace plugins with --all)",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if all {
+				return cobra.NoArgs(cmd, args)
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := backendRequired(backend); err != nil {
 				return err
+			}
+			if all {
+				return printJSON(cmd.OutOrStdout(), installAllPlugins(cmd.Context(), backend, remote, dryRun))
 			}
 			manifest, err := readManifest(manifestPath)
 			if err != nil {
 				return err
 			}
 			result, err := backend.InstallPlugin(cmd.Context(), management.InstallRequest{
-				Ref:         parseRef(args[0]),
-				Source:      source,
-				Force:       force,
-				Runtime:     runtime.spec(),
-				Manifest:    manifest,
-				ManifestRef: manifestRef,
-				DryRun:      dryRun,
+				Ref:          parseRef(args[0]),
+				Source:       source,
+				Force:        force,
+				Runtime:      runtime.spec(),
+				Manifest:     manifest,
+				ManifestRef:  manifestRef,
+				DryRun:       dryRun,
+				PreferRemote: remote,
 			})
 			if err != nil {
 				return err
@@ -371,6 +390,8 @@ func newInstallCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without installing")
 	cmd.Flags().StringVar(&manifestPath, "manifest", "", "plugin manifest JSON file")
 	cmd.Flags().StringVar(&manifestRef, "manifest-ref", "", "plugin manifest reference")
+	cmd.Flags().BoolVar(&all, "all", false, "install every marketplace plugin (rebuilds local_build plugins)")
+	cmd.Flags().BoolVar(&remote, "remote", false, "force the published go_install source instead of a local_path build")
 	addRuntimeFlags(cmd, &runtime)
 	return cmd
 }
