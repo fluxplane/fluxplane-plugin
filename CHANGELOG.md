@@ -2,7 +2,16 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
-## Unreleased
+## v0.4.1
+
+### Fixed
+- `upgrade` (and any `--remote` install) no longer reuses a binary already on
+  PATH when the marketplace entry has a `go_install` source — it now always
+  fetches the latest published version. Previously an existing binary short-
+  circuited resolution, so `upgrade` could silently keep a stale/dev build.
+  (`doctor` surfaces exactly this drift.)
+
+## v0.4.0
 
 ### Added
 - **`fluxplane-plugin dev sync [plugin...]`** — rebuilds installed plugins from

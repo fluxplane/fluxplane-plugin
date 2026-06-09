@@ -7,7 +7,32 @@ import (
 	"testing"
 
 	"github.com/fluxplane/fluxplane-plugin/management"
+	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 )
+
+func TestPreferPathBinary(t *testing.T) {
+	withGoInstall := sdkmanifest.PluginEntry{Binary: "fluxplane-plugin-jira", GoInstall: "example.com/jira@latest"}
+	pathOnly := sdkmanifest.PluginEntry{Binary: "fluxplane-plugin-jira"}
+	noBinary := sdkmanifest.PluginEntry{GoInstall: "example.com/jira@latest"}
+
+	// Normal install reuses a PATH binary for convenience.
+	if !preferPathBinary(false, withGoInstall) {
+		t.Fatal("normal install should reuse PATH binary")
+	}
+	// Upgrade (preferRemote) with a go_install source must NOT reuse PATH —
+	// otherwise it silently keeps a stale binary instead of fetching latest.
+	if preferPathBinary(true, withGoInstall) {
+		t.Fatal("upgrade with go_install must not reuse PATH binary")
+	}
+	// Upgrade of a PATH-only plugin (nothing to fetch) still uses PATH.
+	if !preferPathBinary(true, pathOnly) {
+		t.Fatal("upgrade of PATH-only plugin should use PATH binary")
+	}
+	// No binary name -> never PATH resolution.
+	if preferPathBinary(false, noBinary) {
+		t.Fatal("entry without binary should not resolve via PATH")
+	}
+}
 
 // writeWorkspacePlugin creates a minimal standalone Go module with a
 // cmd/<binary>/main.go so SyncLocalPlugins has something real to build.

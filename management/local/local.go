@@ -2982,7 +2982,7 @@ func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.
 			return cachedRuntime(binPath), artifactLabels(binPath, "local_build"), nil
 		}
 	}
-	if strings.TrimSpace(entry.Binary) != "" {
+	if preferPathBinary(preferRemote, entry) {
 		if path, err := exec.LookPath(strings.TrimSpace(entry.Binary)); err == nil {
 			return management.RuntimeSpec{Kind: "stdio", Command: path}, artifactLabels(path, "path"), nil
 		}
@@ -2998,6 +2998,21 @@ func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.
 		return cachedRuntime(installed), artifactLabels(installed, "go_install"), nil
 	}
 	return management.RuntimeSpec{}, nil, fmt.Errorf("fluxplane-plugin: marketplace plugin %q has no local command, PATH binary, or go_install source", ref.Key())
+}
+
+// preferPathBinary reports whether to resolve a plugin to an existing PATH
+// binary rather than (re)installing it. We reuse a PATH binary for convenience
+// on normal installs, but NOT when forcing remote (upgrade) and a go_install
+// source is available — otherwise `upgrade` would silently reuse a stale binary
+// already on PATH instead of fetching the latest published version.
+func preferPathBinary(preferRemote bool, entry sdkmanifest.PluginEntry) bool {
+	if strings.TrimSpace(entry.Binary) == "" {
+		return false
+	}
+	if preferRemote && strings.TrimSpace(entry.GoInstall) != "" {
+		return false
+	}
+	return true
 }
 
 func (b *Backend) buildLocalMarketplaceBinary(ctx context.Context, localPath, binary, binPath string) error {
