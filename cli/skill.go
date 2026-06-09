@@ -158,7 +158,7 @@ func newSkillCommand(backend management.Backend) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", defaultSkillName, "skill name used in front matter")
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&templatePath, "template", "", "Go text/template file for the combined skill markdown")
 	cmd.AddCommand(newSkillInstallCommand(backend))
 	cmd.AddCommand(newSkillRefreshCommand(backend))
@@ -209,7 +209,7 @@ func newSkillInstallCommand(backend management.Backend) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", defaultSkillName, "skill name (front matter, reference dir, and ~/.claude/skills link)")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "skill output directory (default: ~/.fluxplane/skills/<name>)")
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&mainTemplate, "template", "", "Go text/template file for SKILL.md")
 	cmd.Flags().StringVar(&pluginTemplate, "plugin-template", "", "Go text/template file for reference pages")
 	cmd.Flags().BoolVar(&noClaudeLink, "no-claude-link", false, "do not link ~/.claude/skills/<name> to the output directory")

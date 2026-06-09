@@ -9,6 +9,7 @@ import (
 
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
 func TestSafeProbeOperationsSelection(t *testing.T) {
@@ -47,21 +48,25 @@ func (b *selftestFakeBackend) ListOperations(_ context.Context, req management.O
 	return management.OperationListResult{Plugin: req.Ref, Operations: b.ops}, nil
 }
 
-func (b *selftestFakeBackend) InvokeOperation(_ context.Context, req management.OperationInvokeRequest) (management.OperationInvokeResult, error) {
-	b.invoked = append(b.invoked, req.Operation)
-	if ok, found := b.invokeOK[req.Operation]; found && ok {
-		return management.OperationInvokeResult{Operation: req.Operation, Result: json.RawMessage(`{"ok":true}`)}, nil
+// BatchOperations serves all probes in one call (matching selftest's batched
+// invocation): ok=true -> {ok:true}, present-but-false -> {ok:false}, missing ->
+// a failed call with a structured error.
+func (b *selftestFakeBackend) BatchOperations(_ context.Context, req management.OperationBatchRequest) (management.OperationBatchResult, error) {
+	var results []protocol.OperationResult
+	for _, call := range req.Calls {
+		b.invoked = append(b.invoked, call.Name)
+		switch ok, found := b.invokeOK[call.Name]; {
+		case found && ok:
+			results = append(results, protocol.OperationResult{Name: call.Name, OK: true, Result: json.RawMessage(`{"ok":true}`)})
+		case found:
+			results = append(results, protocol.OperationResult{Name: call.Name, OK: true, Result: json.RawMessage(`{"ok":false}`)})
+		default:
+			results = append(results, protocol.OperationResult{Name: call.Name, OK: false, Error: &protocol.Error{Code: "err", Message: call.Name + " failed"}})
+		}
 	}
-	if _, found := b.invokeOK[req.Operation]; found {
-		// present but false -> result reports ok:false
-		return management.OperationInvokeResult{Operation: req.Operation, Result: json.RawMessage(`{"ok":false}`)}, nil
-	}
-	return management.OperationInvokeResult{}, &opError{op: req.Operation}
+	raw, _ := json.Marshal(protocol.OperationBatchResult{Results: results})
+	return management.OperationBatchResult{Result: raw}, nil
 }
-
-type opError struct{ op string }
-
-func (e *opError) Error() string { return e.op + " failed" }
 
 func TestSelftestReportsPassAndFail(t *testing.T) {
 	backend := &selftestFakeBackend{

@@ -130,13 +130,20 @@ func newDoctorCommand(backend management.Backend) *cobra.Command {
 					want[name] = true
 				}
 			}
-			result := doctorResult{Healthy: true}
+			var eligible []management.Plugin
 			for _, plugin := range plugins {
 				name := strings.TrimSpace(plugin.Ref.Name)
 				if name == "" || (len(want) > 0 && !want[name]) {
 					continue
 				}
-				report := diagnosePlugin(cmd.Context(), backend, plugin, checkLatest, checkAuth)
+				eligible = append(eligible, plugin)
+			}
+			reports := make([]doctorPluginReport, len(eligible))
+			runConcurrent(len(eligible), 0, func(i int) {
+				reports[i] = diagnosePlugin(cmd.Context(), backend, eligible[i], checkLatest, checkAuth)
+			})
+			result := doctorResult{Healthy: true}
+			for _, report := range reports {
 				if !report.OK {
 					result.Healthy = false
 				}

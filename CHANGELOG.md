@@ -2,6 +2,42 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.6.0
+
+Agent-efficiency pass (10 improvements):
+
+### Added
+- **`operation invoke --arg key=value`** — build input without hand-writing JSON;
+  dotted keys nest (`--arg fields.priority=High`) and values parse as JSON when
+  valid (numbers/bools/arrays) else as strings. **`--input -`** reads stdin.
+- **`operation invoke --result-only` / `--field <dot.path>`** already existed;
+  now **`--strict`** makes a missing `--field` path exit non-zero.
+- **`operation search --full`** folds each match's input fields + a runnable
+  example into the result, so search→invoke needs no separate `describe`.
+- **`pluginbinding.NewPagedListResult`** + `ListResult.Total/HasMore/NextPageToken`
+  — a standard truncation/pagination signal for list operations.
+- **`FLUXPLANE_PLUGIN_INSTANCE`** sets the default `--instance` for a session.
+- **`FLUXPLANE_PLUGIN_TIMEOUT_SECONDS`** overrides the new default per-call
+  plugin timeout (120s); a wedged plugin now fails with a clear message instead
+  of hanging forever.
+
+### Changed
+- **Fan-out commands run concurrently.** `operation search`, `doctor`,
+  `selftest`, `datasource search-all`, and `context build-all` invoke plugins in
+  parallel (bounded pool) instead of serially.
+- **Failed `operation invoke` emits a structured error** (`{plugin, operation,
+  error:{code,message,fields,details}}`) so callers read the detail
+  programmatically; the duplicate error line is gone (the entrypoint prints
+  once).
+- **`operation list`/`describe`/input-validation are served from a cached
+  operations list** keyed by the installed binary's mtime — no plugin process
+  spawn when the binary is unchanged; a rebuild/upgrade invalidates it
+  automatically.
+- **`selftest` batches all probes through one plugin process** per plugin
+  instead of one spawn per probe.
+- **`operation invoke --dry-run` redacts secret-ish input fields** (token,
+  secret, password, api_key, …) when echoing the input.
+
 ## v0.5.0
 
 ### Added — agent-ergonomic operation tooling

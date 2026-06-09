@@ -86,7 +86,7 @@ func newOperationDescribeCommand(backend management.Backend) *cobra.Command {
 			return fmt.Errorf("fluxplane-plugin: operation %q not found on plugin %q", opName, ref.Name)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the structured description as JSON")
 	return cmd
 }

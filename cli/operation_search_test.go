@@ -16,26 +16,44 @@ func TestRankOperationMatches(t *testing.T) {
 		{Name: "jira.issue.comment.list", Description: "List comments.", ReadOnly: true},
 		{Name: "jira.issue.create", Description: "Create an issue."},
 	}
-	matches := rankOperationMatches("comment", "jira", ops, false)
+	matches := rankOperationMatches("comment", "jira", ops, false, false)
 	if len(matches) != 2 {
 		t.Fatalf("expected 2 comment matches, got %d: %#v", len(matches), matches)
 	}
 
 	// read-only filter
-	ro := rankOperationMatches("comment", "jira", ops, true)
+	ro := rankOperationMatches("comment", "jira", ops, true, false)
 	if len(ro) != 1 || ro[0].Operation != "jira.issue.comment.list" {
 		t.Fatalf("read-only filter = %#v", ro)
 	}
 
 	// multi-term AND: both terms must appear
-	multi := rankOperationMatches("create issue", "jira", ops, false)
+	multi := rankOperationMatches("create issue", "jira", ops, false, false)
 	if len(multi) != 1 || multi[0].Operation != "jira.issue.create" {
 		t.Fatalf("multi-term = %#v", multi)
 	}
 
 	// no match
-	if m := rankOperationMatches("kubernetes", "jira", ops, false); len(m) != 0 {
+	if m := rankOperationMatches("kubernetes", "jira", ops, false, false); len(m) != 0 {
 		t.Fatalf("expected no match, got %#v", m)
+	}
+}
+
+func TestRankOperationMatchesFull(t *testing.T) {
+	ops := []sdkmanifest.OperationSpec{{
+		Name:        "jira.issue.comment.add",
+		Description: "Add a comment.",
+		Input:       json.RawMessage(`{"required":["key","body_markdown"],"properties":{"key":{"type":"string"},"body_markdown":{"type":"string"}}}`),
+	}}
+	// Without --full: no fields/example.
+	lean := rankOperationMatches("comment", "jira", ops, false, false)
+	if len(lean) != 1 || len(lean[0].Fields) != 0 || lean[0].Example != "" {
+		t.Fatalf("lean match should omit fields/example: %#v", lean[0])
+	}
+	// With --full: fields + runnable example folded in.
+	full := rankOperationMatches("comment", "jira", ops, false, true)
+	if len(full) != 1 || len(full[0].Fields) != 2 || full[0].Example == "" {
+		t.Fatalf("full match should include fields + example: %#v", full[0])
 	}
 }
 
@@ -54,7 +72,7 @@ func (b *searchBackend) ListPlugins(context.Context, management.ListRequest) ([]
 }
 
 func (b *searchBackend) ListOperations(_ context.Context, req management.OperationListRequest) (management.OperationListResult, error) {
-	b.fakeBackend.listOpsReqs = append(b.fakeBackend.listOpsReqs, req)
+	b.fakeBackend.recordListOps(req)
 	return management.OperationListResult{Plugin: req.Ref, Operations: b.byPlugin[req.Ref.Name]}, nil
 }
 

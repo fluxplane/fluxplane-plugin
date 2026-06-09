@@ -12,11 +12,13 @@ import (
 )
 
 type operationMatch struct {
-	Plugin      string   `json:"plugin"`
-	Operation   string   `json:"operation"`
-	Description string   `json:"description,omitempty"`
-	Required    []string `json:"required,omitempty"`
-	ReadOnly    bool     `json:"read_only,omitempty"`
+	Plugin      string                  `json:"plugin"`
+	Operation   string                  `json:"operation"`
+	Description string                  `json:"description,omitempty"`
+	Required    []string                `json:"required,omitempty"`
+	ReadOnly    bool                    `json:"read_only,omitempty"`
+	Fields      []operationFieldSummary `json:"input_fields,omitempty"`
+	Example     string                  `json:"example,omitempty"`
 	score       int
 }
 
@@ -32,6 +34,7 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 	var limit int
 	var readOnlyOnly bool
 	var asJSON bool
+	var full bool
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
 		Short: "Find operations across installed plugins by name and description",
@@ -54,7 +57,7 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 					want[name] = true
 				}
 			}
-			result := operationSearchResult{Query: query, Errors: map[string]string{}}
+			var eligible []management.Plugin
 			for _, plugin := range plugins {
 				name := strings.TrimSpace(plugin.Ref.Name)
 				if name == "" || !plugin.Installed || !plugin.Enabled {
@@ -63,12 +66,27 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 				if len(want) > 0 && !want[name] {
 					continue
 				}
+				eligible = append(eligible, plugin)
+			}
+			// Fan out across plugins concurrently; each writes only its own slot.
+			perMatches := make([][]operationMatch, len(eligible))
+			perErr := make([]string, len(eligible))
+			runConcurrent(len(eligible), 0, func(i int) {
+				plugin := eligible[i]
 				list, err := backend.ListOperations(cmd.Context(), management.OperationListRequest{Ref: plugin.Ref, Instance: instance})
 				if err != nil {
-					result.Errors[name] = err.Error()
+					perErr[i] = err.Error()
+					return
+				}
+				perMatches[i] = rankOperationMatches(query, strings.TrimSpace(plugin.Ref.Name), list.Operations, readOnlyOnly, full)
+			})
+			result := operationSearchResult{Query: query, Errors: map[string]string{}}
+			for i, plugin := range eligible {
+				if perErr[i] != "" {
+					result.Errors[strings.TrimSpace(plugin.Ref.Name)] = perErr[i]
 					continue
 				}
-				result.Matches = append(result.Matches, rankOperationMatches(query, name, list.Operations, readOnlyOnly)...)
+				result.Matches = append(result.Matches, perMatches[i]...)
 			}
 			sort.SliceStable(result.Matches, func(i, j int) bool {
 				if result.Matches[i].score != result.Matches[j].score {
@@ -91,18 +109,19 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 			return renderOperationMatches(cmd, result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringArrayVar(&pluginFilter, "plugin", nil, "restrict the search to these plugins (repeatable)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "maximum matches to return")
 	cmd.Flags().BoolVar(&readOnlyOnly, "read-only", false, "only list read-only operations")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit matches as JSON")
+	cmd.Flags().BoolVar(&full, "full", false, "include each match's input fields and a runnable example (invoke without a separate describe)")
 	return cmd
 }
 
 // rankOperationMatches scores each operation against the query. Every
 // whitespace-separated term must appear somewhere in name+description, else the
 // operation is dropped. Name hits rank above description hits.
-func rankOperationMatches(query, plugin string, ops []sdkmanifest.OperationSpec, readOnlyOnly bool) []operationMatch {
+func rankOperationMatches(query, plugin string, ops []sdkmanifest.OperationSpec, readOnlyOnly, full bool) []operationMatch {
 	terms := strings.Fields(strings.ToLower(query))
 	if len(terms) == 0 {
 		return nil
@@ -145,14 +164,21 @@ func rankOperationMatches(query, plugin string, ops []sdkmanifest.OperationSpec,
 				}
 			}
 		}
-		out = append(out, operationMatch{
+		schema := parseOperationInputSchema(op)
+		match := operationMatch{
 			Plugin:      plugin,
 			Operation:   name,
 			Description: strings.TrimSpace(op.Description),
-			Required:    parseOperationInputSchema(op).Required,
+			Required:    schema.Required,
 			ReadOnly:    op.ReadOnly,
 			score:       score,
-		})
+		}
+		if full {
+			// Fold in enough to invoke without a separate `describe` round-trip.
+			match.Fields = summarizeOperationInput(schema)
+			match.Example = operationExample(plugin, name, schema)
+		}
+		out = append(out, match)
 	}
 	return out
 }
@@ -174,6 +200,9 @@ func renderOperationMatches(cmd *cobra.Command, result operationSearchResult) er
 			line += "  [required: " + strings.Join(m.Required, ", ") + "]"
 		}
 		fmt.Fprintln(w, line)
+		if m.Example != "" {
+			fmt.Fprintln(w, "    example: "+m.Example)
+		}
 	}
 	for plugin, msg := range result.Errors {
 		fmt.Fprintf(cmd.ErrOrStderr(), "search: %s: %s\n", plugin, msg)

@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,6 +39,9 @@ type Backend struct {
 	marketplace      sdkmanifest.Marketplace
 	marketplacePaths []string
 	secretStore      sharedsecret.FileStore
+	// cacheMu serializes best-effort operations-cache writes performed during
+	// the (now-concurrent) read path so they don't corrupt the state file.
+	cacheMu sync.Mutex
 }
 
 // Option configures a local backend.
@@ -261,6 +265,12 @@ type storedPlugin struct {
 	management.Plugin
 	Config   map[string]any  `json:"config,omitempty"`
 	Manifest json.RawMessage `json:"manifest,omitempty"`
+	// OperationsCache holds the plugin's operations list, cached so describe /
+	// list / input-validation can be served without re-spawning the plugin.
+	// OperationsMtime is the installed binary's mtime when cached; a rebuild or
+	// upgrade changes the mtime and invalidates the cache automatically.
+	OperationsCache json.RawMessage `json:"operations_cache,omitempty"`
+	OperationsMtime string          `json:"operations_mtime,omitempty"`
 }
 
 type storedInstance struct {
@@ -985,6 +995,14 @@ func (b *Backend) ListOperations(ctx context.Context, req management.OperationLi
 		return management.OperationListResult{}, err
 	}
 	instance := normalizeInstance(req.Instance)
+	// Serve from the cached operations list when the installed binary is
+	// unchanged, avoiding a plugin process spawn for describe/list/validation.
+	mtime := binaryMtime(plugin)
+	if mtime != "" && plugin.OperationsMtime == mtime && len(plugin.OperationsCache) > 0 {
+		if cached, derr := protocol.DecodePayload[[]sdkmanifest.OperationSpec](plugin.OperationsCache); derr == nil {
+			return management.OperationListResult{Plugin: req.Ref, Instance: instance, Operations: cached}, nil
+		}
+	}
 	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsList, nil)
 	if err != nil {
 		return management.OperationListResult{}, err
@@ -993,7 +1011,45 @@ func (b *Backend) ListOperations(ctx context.Context, req management.OperationLi
 	if err != nil {
 		return management.OperationListResult{}, err
 	}
+	if mtime != "" {
+		b.cacheOperations(req.Ref, copyRaw(resp.Result), mtime)
+	}
 	return management.OperationListResult{Plugin: req.Ref, Instance: instance, Operations: operations}, nil
+}
+
+// binaryMtime returns the installed binary's modification time as a cache key,
+// or "" when there is no resolvable binary path (e.g. a go-run/dev runtime).
+func binaryMtime(plugin storedPlugin) string {
+	path := strings.TrimSpace(plugin.Labels["installed_binary_path"])
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatInt(info.ModTime().UnixNano(), 10)
+}
+
+// cacheOperations persists the operations list for a plugin keyed by binary
+// mtime. It is best-effort and serialized by cacheMu so concurrent read-path
+// callers never corrupt the state file.
+func (b *Backend) cacheOperations(ref management.Ref, raw json.RawMessage, mtime string) {
+	b.cacheMu.Lock()
+	defer b.cacheMu.Unlock()
+	st, err := b.readState()
+	if err != nil {
+		return
+	}
+	key := ref.Key()
+	plugin, ok := st.Plugins[key]
+	if !ok {
+		return
+	}
+	plugin.OperationsCache = raw
+	plugin.OperationsMtime = mtime
+	st.Plugins[key] = plugin
+	_ = b.writeState(st)
 }
 
 // InvokeOperation calls one operation on the plugin runtime.
@@ -1009,6 +1065,11 @@ func (b *Backend) InvokeOperation(ctx context.Context, req management.OperationI
 	input := b.resolveOperationEndpoint(req.Ref, instance, copyRaw(req.Input))
 	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsCall, protocol.OperationCall{Name: strings.TrimSpace(req.Operation), Input: input})
 	if err != nil {
+		// Preserve the plugin's structured error (code/message/fields/details)
+		// instead of collapsing it to the flattened transport message.
+		if resp.Error != nil {
+			return management.OperationInvokeResult{}, &management.OperationFailure{Plugin: req.Ref.Name, Operation: strings.TrimSpace(req.Operation), Err: *resp.Error}
+		}
 		return management.OperationInvokeResult{}, err
 	}
 	return management.OperationInvokeResult{Plugin: req.Ref, Instance: instance, Operation: strings.TrimSpace(req.Operation), Result: copyRaw(resp.Result)}, nil
@@ -1486,6 +1547,13 @@ func (b *Backend) invokePlugin(ctx context.Context, plugin storedPlugin, instanc
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Cap every plugin call so a wedged plugin can't block the agent forever.
+	// Honor an existing caller deadline; otherwise apply the default.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pluginInvokeTimeout())
+		defer cancel()
+	}
 	commandName := strings.TrimSpace(plugin.Runtime.Command)
 	if commandName == "" {
 		commandName = strings.TrimSpace(plugin.Runtime.Path)
@@ -1507,9 +1575,23 @@ func (b *Backend) invokePlugin(ctx context.Context, plugin storedPlugin, instanc
 		pluginruntime.WithHostCaller(cliHost{backend: b, plugin: plugin.Ref.Name, instance: normalizeInstance(instance), conns: conns}),
 	)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return resp, fmt.Errorf("fluxplane-plugin: plugin %q did not respond within %s running %s (set FLUXPLANE_PLUGIN_TIMEOUT_SECONDS to change)", plugin.Ref.Key(), pluginInvokeTimeout(), command)
+		}
 		return resp, fmt.Errorf("fluxplane-plugin: invoke %s on plugin %q: %w", command, plugin.Ref.Key(), err)
 	}
 	return resp, nil
+}
+
+// pluginInvokeTimeout is the default per-call deadline for a plugin invocation,
+// overridable via FLUXPLANE_PLUGIN_TIMEOUT_SECONDS (0 or invalid -> default).
+func pluginInvokeTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("FLUXPLANE_PLUGIN_TIMEOUT_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 120 * time.Second
 }
 
 func (b *Backend) instanceConfig(ref management.Ref, name string) map[string]any {

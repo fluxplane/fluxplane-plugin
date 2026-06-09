@@ -341,6 +341,25 @@ type OperationInvokeResult struct {
 	Result    json.RawMessage `json:"result,omitempty"`
 }
 
+// OperationFailure is a structured operation error: it preserves the plugin's
+// field-level error detail (code/message/fields/details) so callers can act on
+// it programmatically instead of parsing a flattened message string.
+type OperationFailure struct {
+	Plugin    string         `json:"plugin"`
+	Operation string         `json:"operation"`
+	Err       protocol.Error `json:"error"`
+}
+
+func (e *OperationFailure) Error() string {
+	if e == nil {
+		return ""
+	}
+	if code := e.Err.Code; code != "" {
+		return code + ": " + e.Err.Message
+	}
+	return e.Err.Message
+}
+
 // OperationBatchRequest calls multiple operations on one plugin instance.
 type OperationBatchRequest struct {
 	Ref      Ref                      `json:"ref"`

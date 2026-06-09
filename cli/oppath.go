@@ -36,35 +36,36 @@ func extractPath(v any, path string) (any, bool) {
 	return cur, true
 }
 
-// printOperationResult renders an invoke result honoring the output flags:
+// printOperationResultStrict renders an invoke result honoring the output flags
+// and reports whether any requested --field path was missing:
 //   - default: the full {plugin, instance, operation, result} envelope
 //   - resultOnly: just the result payload
 //   - fieldPaths: extract specific dot-paths from the result. A single path
 //     prints its value; multiple paths print an object keyed by path. Any missing
-//     paths are recorded under "missing".
-func printOperationResult(w io.Writer, res management.OperationInvokeResult, resultOnly bool, fieldPaths []string) error {
+//     paths are recorded under "missing" and make the returned bool true.
+func printOperationResultStrict(w io.Writer, res management.OperationInvokeResult, resultOnly bool, fieldPaths []string) (bool, error) {
 	if len(fieldPaths) == 0 && !resultOnly {
-		return printJSON(w, res)
+		return false, printJSON(w, res)
 	}
 
 	var decoded any
 	if len(res.Result) > 0 {
 		if err := json.Unmarshal(res.Result, &decoded); err != nil {
 			// Result isn't JSON we can walk — fall back to printing it raw.
-			return printJSON(w, json.RawMessage(res.Result))
+			return false, printJSON(w, json.RawMessage(res.Result))
 		}
 	}
 
 	if len(fieldPaths) == 0 {
-		return printJSON(w, decoded)
+		return false, printJSON(w, decoded)
 	}
 
 	if len(fieldPaths) == 1 {
 		value, ok := extractPath(decoded, fieldPaths[0])
 		if !ok {
-			return printJSON(w, map[string]any{"missing": fieldPaths})
+			return true, printJSON(w, map[string]any{"missing": fieldPaths})
 		}
-		return printJSON(w, value)
+		return false, printJSON(w, value)
 	}
 
 	out := map[string]any{}
@@ -80,7 +81,61 @@ func printOperationResult(w io.Writer, res management.OperationInvokeResult, res
 	if len(missing) > 0 {
 		out["missing"] = missing
 	}
-	return printJSON(w, out)
+	return len(missing) > 0, printJSON(w, out)
+}
+
+// secretKeyFragments name input fields whose values must be redacted when an
+// input payload is echoed back (e.g. dry-run). Chosen to avoid false positives
+// like issue_key / parent_key / author / account_id.
+var secretKeyFragments = []string{
+	"password", "passwd", "secret", "token", "credential",
+	"api_key", "apikey", "access_key", "private_key", "client_secret", "authorization",
+}
+
+func isSecretKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, fragment := range secretKeyFragments {
+		if strings.Contains(key, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactInputForDisplay returns a copy of an input payload with secret-ish field
+// values masked, so echoing input (dry-run, validation reports) never leaks
+// tokens into logs.
+func redactInputForDisplay(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return raw
+	}
+	redactSecrets(v)
+	out, err := json.Marshal(v)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func redactSecrets(v any) {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, child := range node {
+			if isSecretKey(key) {
+				node[key] = "[redacted]"
+				continue
+			}
+			redactSecrets(child)
+		}
+	case []any:
+		for _, item := range node {
+			redactSecrets(item)
+		}
+	}
 }
 
 // splitFieldPaths parses a comma-separated --field value into trimmed paths.

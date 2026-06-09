@@ -10,6 +10,7 @@ import (
 
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
+	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
 
 type selftestOpResult struct {
@@ -56,13 +57,20 @@ func newSelftestCommand(backend management.Backend) *cobra.Command {
 					want[name] = true
 				}
 			}
-			result := selftestResult{Healthy: true}
+			var eligible []management.Plugin
 			for _, plugin := range plugins {
 				name := strings.TrimSpace(plugin.Ref.Name)
 				if name == "" || (len(want) > 0 && !want[name]) {
 					continue
 				}
-				report := selftestPlugin(cmd.Context(), backend, plugin.Ref, authOnly)
+				eligible = append(eligible, plugin)
+			}
+			reports := make([]selftestPluginResult, len(eligible))
+			runConcurrent(len(eligible), 0, func(i int) {
+				reports[i] = selftestPlugin(cmd.Context(), backend, eligible[i].Ref, authOnly)
+			})
+			result := selftestResult{Healthy: true}
+			for _, report := range reports {
 				if !report.OK {
 					result.Healthy = false
 				}
@@ -89,17 +97,30 @@ func selftestPlugin(ctx context.Context, backend management.Backend, ref managem
 		report.Message = "no read-safe operations to probe"
 		return report
 	}
-	for _, op := range probes {
-		res := selftestOpResult{Operation: op}
-		invoke, err := backend.InvokeOperation(ctx, management.OperationInvokeRequest{
-			Ref:       ref,
-			Operation: op,
-			Input:     json.RawMessage(`{}`),
-		})
+	// Run all probes through a single batched call so the plugin process is
+	// spawned once per plugin instead of once per probe.
+	calls := make([]protocol.OperationCall, len(probes))
+	for i, op := range probes {
+		calls[i] = protocol.OperationCall{Name: op, Input: json.RawMessage(`{}`)}
+	}
+	batch, err := backend.BatchOperations(ctx, management.OperationBatchRequest{Ref: ref, Calls: calls})
+	if err != nil {
+		report.OK = false
+		report.Message = "batch probes: " + err.Error()
+		return report
+	}
+	var parsed protocol.OperationBatchResult
+	if err := json.Unmarshal(batch.Result, &parsed); err != nil {
+		report.OK = false
+		report.Message = "decode batch result: " + err.Error()
+		return report
+	}
+	for _, called := range parsed.Results {
+		res := selftestOpResult{Operation: strings.TrimSpace(called.Name)}
 		switch {
-		case err != nil:
-			res.Error = err.Error()
-		case resultReportsFailure(invoke.Result):
+		case !called.OK:
+			res.Error = batchCallError(called)
+		case resultReportsFailure(called.Result):
 			res.Error = "operation reported ok=false"
 		default:
 			res.OK = true
@@ -113,6 +134,16 @@ func selftestPlugin(ctx context.Context, backend management.Backend, ref managem
 		report.Operations = append(report.Operations, res)
 	}
 	return report
+}
+
+func batchCallError(result protocol.OperationResult) string {
+	if result.Error != nil {
+		if result.Error.Code != "" {
+			return result.Error.Code + ": " + result.Error.Message
+		}
+		return result.Error.Message
+	}
+	return "operation failed"
 }
 
 // safeProbeOperations selects the operations that can be invoked without

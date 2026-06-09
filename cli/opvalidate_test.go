@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -107,14 +108,19 @@ func TestInvokeDryRunDoesNotInvoke(t *testing.T) {
 
 func TestInvokeFailsFastOnInvalidInput(t *testing.T) {
 	backend := invokeValidationBackend(`{"required":["key"],"properties":{"key":{"type":"string"}}}`)
-	cmd := New(Options{Backend: backend, Out: &bytes.Buffer{}, Err: &bytes.Buffer{}})
+	var errBuf bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &bytes.Buffer{}, Err: &errBuf})
 	cmd.SetArgs([]string{"operation", "invoke", "demo", "demo.do", "--input", `{}`})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "local validation") {
-		t.Fatalf("expected validation failure, got %v", err)
+	if !errors.Is(err, ErrReported) {
+		t.Fatalf("expected ErrReported, got %v", err)
 	}
 	if backend.invokeCount != 0 {
 		t.Fatalf("invalid input must not reach the backend; count=%d", backend.invokeCount)
+	}
+	// The structured validation error is written for the agent to parse.
+	if !strings.Contains(errBuf.String(), "invalid_input") || !strings.Contains(errBuf.String(), `"key"`) {
+		t.Fatalf("expected structured validation error, got %s", errBuf.String())
 	}
 }
 

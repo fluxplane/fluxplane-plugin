@@ -43,6 +43,9 @@ func New(opts Options) *cobra.Command {
 		Use:          "fluxplane-plugin",
 		Short:        "Manage Fluxplane plugins",
 		SilenceUsage: true,
+		// The entrypoint prints returned errors exactly once; don't let cobra
+		// also print them (that produced a duplicate "Error: ..." line).
+		SilenceErrors: true,
 		// Runs only when a command's RunE succeeded. Regenerates installed
 		// skills after state-changing commands so the skill never goes stale.
 		PersistentPostRunE: func(c *cobra.Command, _ []string) error {
@@ -85,6 +88,20 @@ func backendRequired(backend management.Backend) error {
 		return errors.New("fluxplane-plugin: no plugin management backend configured")
 	}
 	return nil
+}
+
+// ErrReported signals that a command already wrote a structured error to its
+// output stream and the entrypoint should exit non-zero WITHOUT printing again.
+var ErrReported = errors.New("fluxplane-plugin: error already reported")
+
+// defaultInstance is the instance used when --instance is not passed. It honors
+// FLUXPLANE_PLUGIN_INSTANCE so an agent can scope a whole session to one
+// instance without repeating the flag on every call.
+func defaultInstance() string {
+	if v := strings.TrimSpace(os.Getenv("FLUXPLANE_PLUGIN_INSTANCE")); v != "" {
+		return v
+	}
+	return management.DefaultInstance
 }
 
 func parseRef(arg string) management.Ref {
@@ -622,7 +639,7 @@ func newAuthStatusCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -643,7 +660,7 @@ func newAuthMethodsCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -695,7 +712,7 @@ func newAuthConnectCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&method, "method", "", "auth method")
 	cmd.Flags().StringArrayVar(&metadataValues, "field", nil, "auth field as key=value")
 	cmd.Flags().StringArrayVar(&endpointValues, "endpoint", nil, "endpoint as name=url or url")
@@ -745,7 +762,7 @@ func newAuthAutoCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), out)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
 	return cmd
 }
@@ -769,7 +786,7 @@ func newAuthTestCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&method, "method", "default", "auth method")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
 	return cmd
@@ -794,7 +811,7 @@ func newAuthDisconnectCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&method, "method", "default", "auth method")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "resolve without changing state")
 	return cmd
@@ -833,7 +850,7 @@ func newOperationListCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -841,10 +858,12 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	var instance string
 	var input string
 	var inputFile string
+	var argVals []string
 	var dryRun bool
 	var noValidate bool
 	var resultOnly bool
 	var fields string
+	var strict bool
 	cmd := &cobra.Command{
 		Use:     "invoke PLUGIN[@VERSION] OPERATION",
 		Aliases: []string{"run", "call"},
@@ -856,7 +875,7 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 			}
 			ref := parseRef(args[0])
 			opName := args[1]
-			payload, err := readJSONPayload(input, inputFile)
+			payload, err := buildInvokeInput(input, inputFile, argVals, cmd.InOrStdin())
 			if err != nil {
 				return err
 			}
@@ -873,34 +892,50 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 					problems := validateOperationInput(schema, payload)
 					if dryRun {
 						return printJSON(cmd.OutOrStdout(), operationDryRunResult{
-							Plugin: ref.Name, Operation: opName, Valid: len(problems) == 0, Problems: problems, Input: payload,
+							Plugin: ref.Name, Operation: opName, Valid: len(problems) == 0, Problems: problems, Input: redactInputForDisplay(payload),
 						})
 					}
 					if len(problems) > 0 {
 						_ = printJSON(cmd.ErrOrStderr(), protocol.Error{Code: "invalid_input", Message: "input failed local validation", Fields: problemFields(problems)})
-						return fmt.Errorf("fluxplane-plugin: input failed local validation for %s %s", ref.Name, opName)
+						return ErrReported
 					}
 				} else if dryRun {
-					return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: payload})
+					return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: redactInputForDisplay(payload)})
 				}
 			} else if dryRun {
-				return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: payload})
+				return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: redactInputForDisplay(payload)})
 			}
 
 			result, err := backend.InvokeOperation(cmd.Context(), management.OperationInvokeRequest{Ref: ref, Instance: instance, Operation: opName, Input: payload})
 			if err != nil {
+				// Surface the plugin's structured error so an agent can read
+				// code/fields/details from stderr JSON instead of a flat string.
+				var opErr *management.OperationFailure
+				if errors.As(err, &opErr) {
+					_ = printJSON(cmd.ErrOrStderr(), opErr)
+					return ErrReported
+				}
 				return err
 			}
-			return printOperationResult(cmd.OutOrStdout(), result, resultOnly, splitFieldPaths(fields))
+			missing, err := printOperationResultStrict(cmd.OutOrStdout(), result, resultOnly, splitFieldPaths(fields))
+			if err != nil {
+				return err
+			}
+			if strict && missing {
+				return ErrReported
+			}
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
-	cmd.Flags().StringVar(&input, "input", "", "operation input JSON")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
+	cmd.Flags().StringVar(&input, "input", "", "operation input JSON (\"-\" reads stdin)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation input JSON file")
+	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "set an input field as key=value; dotted keys nest (e.g. --arg fields.priority=High); values parse as JSON when valid")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate input locally and report; do not call the backend")
 	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation")
 	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
 	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result (e.g. key,issue.fields.status.name)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero when a --field path is missing")
 	return cmd
 }
 
@@ -959,7 +994,7 @@ func newOperationBatchCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&input, "input", "", "operation batch JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation batch JSON file")
 	return cmd
@@ -1034,7 +1069,7 @@ func newDatasourceListCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -1077,7 +1112,7 @@ func newDatasourceCallCommand(backend management.Backend, capability string) *co
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&input, "input", "", "datasource input JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "datasource input JSON file")
 	return cmd
@@ -1103,7 +1138,7 @@ func newDatasourceSearchAllCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), map[string]any{"query": query, "results": result})
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&entity, "entity", "", "entity type filter")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum records per plugin")
 	return cmd
@@ -1137,7 +1172,7 @@ func newLookupCommandWithUse(backend management.Backend, use, short string) *cob
 			return printJSON(cmd.OutOrStdout(), map[string]any{"text": text, "results": result})
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&entity, "entity", "", "entity type filter")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum matches per plugin")
 	return cmd
@@ -1174,7 +1209,7 @@ func newContextListCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -1205,7 +1240,7 @@ func newContextBuildCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&query, "query", "", "context query")
 	cmd.Flags().StringArrayVar(&kinds, "kind", nil, "context block kind filter")
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum context blocks to return")
@@ -1234,7 +1269,7 @@ func newContextBuildAllCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), map[string]any{"query": query, "results": result})
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringArrayVar(&kinds, "kind", nil, "context block kind filter")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum context blocks per plugin")
 	return cmd
@@ -1269,7 +1304,7 @@ func newEvidenceListCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -1302,7 +1337,7 @@ func newEvidenceObserveCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&phase, "phase", "", "observation phase")
 	cmd.Flags().StringVar(&input, "input", "", "evidence observe input JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "evidence observe input JSON file")
@@ -1325,8 +1360,9 @@ func fanoutDatasource(ctx context.Context, backend management.Backend, capabilit
 	if err != nil {
 		return nil, err
 	}
-	out := make([]fanoutCallResult, 0, len(plugins))
-	for _, plugin := range plugins {
+	out := make([]fanoutCallResult, len(plugins))
+	runConcurrent(len(plugins), 0, func(i int) {
+		plugin := plugins[i]
 		call, err := backend.CallDatasource(ctx, management.DatasourceCallRequest{Ref: plugin.Ref, Instance: instance, Capability: capability, Input: raw})
 		result := fanoutCallResult{Plugin: plugin.Ref, Instance: instance}
 		if err != nil {
@@ -1334,8 +1370,8 @@ func fanoutDatasource(ctx context.Context, backend management.Backend, capabilit
 		} else {
 			result.Result = copyRaw(call.Result)
 		}
-		out = append(out, result)
-	}
+		out[i] = result
+	})
 	return out, nil
 }
 
@@ -1344,20 +1380,27 @@ func datasourceCapablePlugins(ctx context.Context, backend management.Backend, i
 	if err != nil {
 		return nil, err
 	}
-	var out []management.Plugin
-	for _, plugin := range plugins {
+	keep := make([]bool, len(plugins))
+	runConcurrent(len(plugins), 0, func(i int) {
+		plugin := plugins[i]
 		if !plugin.Installed || !plugin.Enabled {
-			continue
+			return
 		}
 		listed, err := backend.ListDatasources(ctx, management.DatasourceListRequest{Ref: plugin.Ref, Instance: instance})
 		if err != nil {
-			continue
+			return
 		}
 		for _, datasource := range listed.Datasources {
 			if hasCapability(datasource.Capabilities, capability) {
-				out = append(out, plugin)
-				break
+				keep[i] = true
+				return
 			}
+		}
+	})
+	var out []management.Plugin
+	for i, plugin := range plugins {
+		if keep[i] {
+			out = append(out, plugin)
 		}
 	}
 	return out, nil
@@ -1368,8 +1411,9 @@ func fanoutContext(ctx context.Context, backend management.Backend, instance, qu
 	if err != nil {
 		return nil, err
 	}
-	out := make([]fanoutCallResult, 0, len(plugins))
-	for _, plugin := range plugins {
+	out := make([]fanoutCallResult, len(plugins))
+	runConcurrent(len(plugins), 0, func(i int) {
+		plugin := plugins[i]
 		call, err := backend.BuildContext(ctx, management.ContextBuildRequest{Ref: plugin.Ref, Instance: instance, Query: query, Kinds: kinds, Limit: limit})
 		result := fanoutCallResult{Plugin: plugin.Ref, Instance: instance}
 		if err != nil {
@@ -1377,8 +1421,8 @@ func fanoutContext(ctx context.Context, backend management.Backend, instance, qu
 		} else {
 			result.Result = copyRaw(call.Result)
 		}
-		out = append(out, result)
-	}
+		out[i] = result
+	})
 	return out, nil
 }
 
@@ -1387,16 +1431,23 @@ func contextCapablePlugins(ctx context.Context, backend management.Backend, inst
 	if err != nil {
 		return nil, err
 	}
-	var out []management.Plugin
-	for _, plugin := range plugins {
+	keep := make([]bool, len(plugins))
+	runConcurrent(len(plugins), 0, func(i int) {
+		plugin := plugins[i]
 		if !plugin.Installed || !plugin.Enabled {
-			continue
+			return
 		}
 		listed, err := backend.ListContextProviders(ctx, management.ContextListRequest{Ref: plugin.Ref, Instance: instance})
 		if err != nil || len(listed.Context) == 0 {
-			continue
+			return
 		}
-		out = append(out, plugin)
+		keep[i] = true
+	})
+	var out []management.Plugin
+	for i, plugin := range plugins {
+		if keep[i] {
+			out = append(out, plugin)
+		}
 	}
 	return out, nil
 }
@@ -1447,7 +1498,7 @@ func newIndexBuildCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&index, "index", "", "index name to build")
 	cmd.Flags().StringVar(&entity, "entity", "", "entity type to build")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and render without storing")
@@ -1475,7 +1526,7 @@ func newIndexStatusCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	return cmd
 }
 
@@ -1695,7 +1746,7 @@ func newEndpointTestCommand(backend management.Backend) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().BoolVar(&failOnError, "fail-on-error", true, "return a non-zero exit code when the endpoint test fails")
 	return cmd
 }
@@ -1728,7 +1779,7 @@ func newEndpointDoctorCommand(backend management.Backend) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().BoolVar(&failOnError, "fail-on-error", true, "return a non-zero exit code when any endpoint test fails")
 	return cmd
 }
@@ -1850,7 +1901,7 @@ func newEndpointDiscoverCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
-	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
+	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&contextName, "context", "", "discovery context")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "discovery namespace")
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum endpoint candidates to return")

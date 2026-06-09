@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync"
 	"testing"
 
 	fpcontext "github.com/fluxplane/fluxplane-context"
@@ -44,6 +45,20 @@ type fakeBackend struct {
 	invokeFn    func(management.OperationInvokeRequest) (management.OperationInvokeResult, error)
 	listOpsReqs []management.OperationListRequest
 	invokeCount int
+	mu          sync.Mutex
+}
+
+func (f *fakeBackend) recordListOps(req management.OperationListRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listOpsReqs = append(f.listOpsReqs, req)
+}
+
+func (f *fakeBackend) recordInvoke(req management.OperationInvokeRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invoked = req
+	f.invokeCount++
 }
 
 func (f *fakeBackend) InstallPlugin(_ context.Context, req management.InstallRequest) (management.InstallResult, error) {
@@ -112,7 +127,7 @@ func (f *fakeBackend) AuthDisconnect(_ context.Context, req management.AuthDisco
 }
 
 func (f *fakeBackend) ListOperations(_ context.Context, req management.OperationListRequest) (management.OperationListResult, error) {
-	f.listOpsReqs = append(f.listOpsReqs, req)
+	f.recordListOps(req)
 	if f.listOpsFn != nil {
 		return f.listOpsFn(req)
 	}
@@ -120,8 +135,7 @@ func (f *fakeBackend) ListOperations(_ context.Context, req management.Operation
 }
 
 func (f *fakeBackend) InvokeOperation(_ context.Context, req management.OperationInvokeRequest) (management.OperationInvokeResult, error) {
-	f.invoked = req
-	f.invokeCount++
+	f.recordInvoke(req)
 	if f.invokeFn != nil {
 		return f.invokeFn(req)
 	}

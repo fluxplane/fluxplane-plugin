@@ -2,9 +2,12 @@ package local
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
@@ -161,5 +164,60 @@ func TestSyncLocalPluginsReportsUnknownNamed(t *testing.T) {
 	got, ok := findSync(res.Plugins, "ghost")
 	if !ok || !got.Skipped || got.Reason != "not installed" {
 		t.Fatalf("expected not-installed skip, got %#v", got)
+	}
+}
+
+func TestPluginInvokeTimeoutEnv(t *testing.T) {
+	if got := pluginInvokeTimeout(); got.Seconds() != 120 {
+		t.Fatalf("default timeout = %v, want 120s", got)
+	}
+	t.Setenv("FLUXPLANE_PLUGIN_TIMEOUT_SECONDS", "5")
+	if got := pluginInvokeTimeout(); got.Seconds() != 5 {
+		t.Fatalf("override = %v, want 5s", got)
+	}
+	t.Setenv("FLUXPLANE_PLUGIN_TIMEOUT_SECONDS", "garbage")
+	if got := pluginInvokeTimeout(); got.Seconds() != 120 {
+		t.Fatalf("invalid override should fall back to 120s, got %v", got)
+	}
+}
+
+func TestListOperationsServesFromCache(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A real file to key the cache on; the runtime command is bogus so any
+	// attempt to actually spawn the plugin fails (proving cache hits don't spawn).
+	binPath := filepath.Join(t.TempDir(), "demo-bin")
+	if werr := os.WriteFile(binPath, []byte("x"), 0o755); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, ierr := backend.InstallPlugin(context.Background(), management.InstallRequest{
+		Ref:     management.Ref{Name: "demo"},
+		Runtime: management.RuntimeSpec{Kind: "stdio", Command: "/nonexistent/demo-binary"},
+		Labels:  map[string]string{"installed_binary_path": binPath},
+	}); ierr != nil {
+		t.Fatalf("install: %v", ierr)
+	}
+
+	info, _ := os.Stat(binPath)
+	mtime := strconv.FormatInt(info.ModTime().UnixNano(), 10)
+	backend.cacheOperations(management.Ref{Name: "demo"}, json.RawMessage(`[{"name":"demo.read","read_only":true}]`), mtime)
+
+	// Cache hit: returns cached ops without spawning the (bogus) binary.
+	res, err := backend.ListOperations(context.Background(), management.OperationListRequest{Ref: management.Ref{Name: "demo"}})
+	if err != nil {
+		t.Fatalf("cache hit should not spawn/err: %v", err)
+	}
+	if len(res.Operations) != 1 || res.Operations[0].Name != "demo.read" {
+		t.Fatalf("cached operations = %#v", res.Operations)
+	}
+
+	// Invalidate by bumping the binary mtime -> cache miss -> tries to spawn the
+	// bogus command and fails.
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(binPath, future, future)
+	if _, err := backend.ListOperations(context.Background(), management.OperationListRequest{Ref: management.Ref{Name: "demo"}}); err == nil {
+		t.Fatal("stale cache (changed mtime) should miss and attempt a spawn (error)")
 	}
 }
