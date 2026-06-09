@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"sort"
@@ -86,6 +87,15 @@ func newUpgradeCommand(backend management.Backend) *cobra.Command {
 				}
 			}
 			if !skipPlugins {
+				// Pick up newly published plugins by refreshing the cached catalog
+				// from remote (optional backend capability; best-effort).
+				if r, ok := backend.(interface {
+					RefreshMarketplace(context.Context) error
+				}); ok && !dryRun {
+					if err := r.RefreshMarketplace(cmd.Context()); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "marketplace: refresh failed: %v\n", err)
+					}
+				}
 				result.Plugins = installAllPlugins(cmd.Context(), backend, true, dryRun)
 			}
 			if !dryRun {

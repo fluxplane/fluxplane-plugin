@@ -100,16 +100,86 @@ func New(opts ...Option) (*Backend, error) {
 		backend.secretStore = sharedsecret.NewFileStore("")
 	}
 	if len(backend.marketplace.Plugins) == 0 {
-		if len(backend.marketplacePaths) == 0 {
+		explicit := len(backend.marketplacePaths) > 0
+		if !explicit {
 			backend.marketplacePaths = defaultMarketplacePaths()
 		}
 		marketplace, err := loadMarketplaceFiles(backend.marketplacePaths)
 		if err != nil {
 			return nil, err
 		}
+		// Clean install with no local catalog: best-effort fetch the published
+		// catalog from the fluxplane-plugins repo and cache it under the state
+		// dir so subsequent runs read it locally. Offline failures are ignored.
+		if len(marketplace.Plugins) == 0 && !explicit {
+			if fetched, ferr := fetchRemoteMarketplace(context.Background(), filepath.Dir(backend.path)); ferr == nil {
+				marketplace = fetched
+			}
+		}
 		backend.marketplace = marketplace
 	}
 	return backend, nil
+}
+
+// RefreshMarketplace re-fetches the published catalog from the remote and
+// updates the cached copy + in-memory catalog. Used by `upgrade` so newly
+// published plugins are picked up.
+func (b *Backend) RefreshMarketplace(ctx context.Context) error {
+	fetched, err := fetchRemoteMarketplace(ctx, filepath.Dir(b.path))
+	if err != nil {
+		return err
+	}
+	if len(fetched.Plugins) > 0 {
+		b.marketplace = fetched
+	}
+	return nil
+}
+
+const defaultMarketplaceURL = "https://raw.githubusercontent.com/fluxplane/fluxplane-plugins/main/marketplace.json"
+
+func marketplaceURL() string {
+	if v := strings.TrimSpace(os.Getenv("FLUXPLANE_PLUGIN_MARKETPLACE_URL")); v != "" {
+		return v
+	}
+	return defaultMarketplaceURL
+}
+
+// fetchRemoteMarketplace downloads the published plugin catalog over HTTP and
+// caches it at <stateDir>/marketplace.json. The cached entries' local_path
+// values resolve under the state dir (absent on a clean machine), so installs
+// naturally fall through to the published go_install source.
+func fetchRemoteMarketplace(ctx context.Context, stateDir string) (sdkmanifest.Marketplace, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, marketplaceURL(), nil)
+	if err != nil {
+		return sdkmanifest.Marketplace{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return sdkmanifest.Marketplace{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return sdkmanifest.Marketplace{}, fmt.Errorf("fluxplane-plugin: fetch marketplace %q: status %d", marketplaceURL(), resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return sdkmanifest.Marketplace{}, err
+	}
+	var marketplace sdkmanifest.Marketplace
+	if err := json.Unmarshal(data, &marketplace); err != nil {
+		return sdkmanifest.Marketplace{}, fmt.Errorf("fluxplane-plugin: parse remote marketplace: %w", err)
+	}
+	cache := filepath.Join(stateDir, "marketplace.json")
+	if err := os.MkdirAll(stateDir, 0o755); err == nil {
+		if err := os.WriteFile(cache, data, 0o644); err == nil {
+			if loaded, lerr := loadMarketplaceFiles([]string{cache}); lerr == nil && len(loaded.Plugins) > 0 {
+				return loaded, nil
+			}
+		}
+	}
+	return marketplace, nil
 }
 
 func defaultStatePath() (string, error) {
