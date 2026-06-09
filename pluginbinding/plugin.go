@@ -57,6 +57,12 @@ type TextResult struct {
 type Error struct {
 	Code    string
 	Message string
+	// Fields carries field-level error detail (field name -> reason). When set
+	// it is propagated to the protocol error so callers can see which input
+	// field was rejected without parsing the message.
+	Fields map[string]string
+	// Details carries additional non-field messages from an upstream error.
+	Details []string
 }
 
 type operation interface {
@@ -534,7 +540,7 @@ func (op typedOperation[I, O]) Run(ctx Context) protocol.OperationResult {
 	if err != nil {
 		var pluginErr Error
 		if errors.As(err, &pluginErr) {
-			return OperationError(ctx.Call, pluginErr.Code, pluginErr.Message)
+			return operationErrorFrom(ctx.Call, pluginErr)
 		}
 		return OperationError(ctx.Call, "plugin_error", err.Error())
 	}
@@ -678,12 +684,33 @@ func Errorf(code, format string, args ...any) error {
 	return Error{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
+// FieldError builds an error that carries field-level detail (field -> reason)
+// alongside the message, so a caller can identify the offending input field
+// programmatically. Use it when an upstream returns structured validation
+// errors (e.g. a REST API's per-field errors map).
+func FieldError(code, message string, fields map[string]string, details ...string) error {
+	return Error{Code: code, Message: message, Fields: fields, Details: details}
+}
+
 func (e Error) Error() string {
 	return e.Message
 }
 
 func OperationError(call protocol.OperationCall, code, message string) protocol.OperationResult {
 	return protocol.OperationResult{ID: call.ID, Name: call.Name, OK: false, Error: &protocol.Error{Code: code, Message: message}}
+}
+
+// operationErrorFrom builds an operation error result preserving any structured
+// field/detail information carried by a pluginbinding.Error.
+func operationErrorFrom(call protocol.OperationCall, err Error) protocol.OperationResult {
+	protoErr := &protocol.Error{Code: err.Code, Message: err.Message}
+	if len(err.Fields) > 0 {
+		protoErr.Fields = err.Fields
+	}
+	if len(err.Details) > 0 {
+		protoErr.Details = err.Details
+	}
+	return protocol.OperationResult{ID: call.ID, Name: call.Name, OK: false, Error: protoErr}
 }
 
 func OKText(text string, data any) protocol.Response {

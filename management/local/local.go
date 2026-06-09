@@ -444,6 +444,96 @@ func (b *Backend) UpdatePlugin(ctx context.Context, req management.UpdateRequest
 	return management.UpdateResult{Plugin: plugin.Plugin, Updated: true}, nil
 }
 
+// SyncLocalPlugins rebuilds installed plugins from their recorded workspace
+// local_path, writing each binary back to its installed path. Unlike install it
+// never consults the marketplace catalog, so a stale cached marketplace.json
+// (whose entries carry no usable local_path) cannot shadow the workspace build.
+// Plugins without a recorded local_path or a matching cmd/<binary> directory are
+// skipped with a reason. With no Refs it rebuilds every installed plugin.
+func (b *Backend) SyncLocalPlugins(ctx context.Context, req management.SyncRequest) (management.SyncResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.SyncResult{}, err
+	}
+	want := map[string]bool{}
+	if !req.All {
+		for _, ref := range req.Refs {
+			if name := strings.TrimSpace(ref.Name); name != "" {
+				want[name] = true
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var out []management.SyncPluginResult
+	for _, plugin := range st.Plugins {
+		name := strings.TrimSpace(plugin.Ref.Name)
+		if name == "" || (len(want) > 0 && !want[name]) {
+			continue
+		}
+		seen[name] = true
+		res := management.SyncPluginResult{Plugin: plugin.Ref}
+		localPath := strings.TrimSpace(plugin.Labels["local_path"])
+		binary := strings.TrimSpace(plugin.Labels["binary"])
+		// Prefer the current marketplace entry: its local_path reflects the
+		// workspace this command is running against, whereas the stored label may
+		// have been recorded from a cached marketplace.json with a stale path.
+		if entry, ok := b.resolveMarketplace(plugin.Ref); ok {
+			if lp := strings.TrimSpace(entry.LocalPath); lp != "" {
+				localPath = lp
+			}
+			if bin := strings.TrimSpace(entry.Binary); bin != "" {
+				binary = bin
+			}
+		}
+		if localPath == "" || binary == "" {
+			res.Skipped, res.Reason = true, "no workspace local_path recorded"
+			out = append(out, res)
+			continue
+		}
+		res.LocalPath = localPath
+		cmdDir := filepath.Join(localPath, "cmd", binary)
+		if info, statErr := os.Stat(cmdDir); statErr != nil || !info.IsDir() {
+			res.Skipped, res.Reason = true, fmt.Sprintf("no command directory at %s", cmdDir)
+			out = append(out, res)
+			continue
+		}
+		binPath := strings.TrimSpace(plugin.Labels["installed_binary_path"])
+		if binPath == "" {
+			binPath = filepath.Join(b.binDir, executableName(binary))
+		}
+		res.BinaryPath = binPath
+		if req.DryRun {
+			out = append(out, res)
+			continue
+		}
+		if err := b.buildLocalMarketplaceBinary(ctx, localPath, binary, binPath); err != nil {
+			res.Error = err.Error()
+			out = append(out, res)
+			continue
+		}
+		res.Rebuilt = true
+		plugin.Labels = mergeLabels(plugin.Labels, artifactLabels(binPath, "local_build"))
+		plugin.UpdatedAt = time.Now().UTC()
+		st.Plugins[plugin.Ref.Key()] = plugin
+		out = append(out, res)
+	}
+	for name := range want {
+		if !seen[name] {
+			out = append(out, management.SyncPluginResult{Plugin: management.Ref{Name: name}, Skipped: true, Reason: "not installed"})
+		}
+	}
+	if !req.DryRun {
+		if err := b.writeState(st); err != nil {
+			return management.SyncResult{}, err
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Plugin.Name < out[j].Plugin.Name })
+	return management.SyncResult{Plugins: out}, nil
+}
+
 // ListPlugins lists locally installed plugins.
 func (b *Backend) ListPlugins(_ context.Context, req management.ListRequest) ([]management.Plugin, error) {
 	st, err := b.readState()

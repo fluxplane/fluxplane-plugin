@@ -2,6 +2,39 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## Unreleased
+
+### Added
+- **`fluxplane-plugin dev sync [plugin...]`** — rebuilds installed plugins from
+  their workspace `local_path`, writing each binary back to its installed path.
+  Unlike `install`, it never consults the marketplace catalog and prefers the
+  current workspace marketplace entry's `local_path`, so a stale cached
+  `marketplace.json` can no longer shadow a workspace build (the recurring
+  dev-loop footgun). Backed by the optional `management.LocalSyncer` capability.
+- **`fluxplane-plugin doctor [plugin...]`** — diagnoses each installed plugin's
+  binary provenance from `go version -m`, flagging dev/dirty builds (local
+  `go build`, `(devel)`, or a modified tree at build time) that silently drift
+  from source. `--latest` resolves each module's newest published version and
+  flags version drift; `--check-auth` runs each plugin's live `auth.test`.
+- **`fluxplane-plugin selftest [plugin...]`** — exercises each plugin's
+  read-safe probes (its `auth.test` plus read-only operations requiring no input
+  beyond `endpoint_ref`) and reports green/red per plugin, for use as a
+  post-upgrade or release gate. `--auth-only` limits it to `auth.test`.
+- **`pluginbinding.VerifyAppliedWarning` / `FieldCheck` / `UnappliedFields`** — a
+  reusable write-verification convention. A plugin re-reads an entity after a
+  write and compares requested vs applied field values; any field the backend
+  accepted (2xx) but silently dropped is named in a warning, so `"ok": true`
+  never masks a no-op write.
+- **`pluginbinding.FieldError` + `protocol.Error.Fields`/`Details`** — a
+  structured error envelope carrying field-level detail (field → reason) and
+  extra messages, so callers identify the offending input programmatically
+  instead of parsing the message string.
+
+### Changed
+- The skill invocation example generator now uses a JSON Schema `examples` entry
+  on an operation's input schema when present, which is the only way to produce
+  a runnable example for operations with one-of input requirements.
+
 ## v0.3.0
 
 ### Added

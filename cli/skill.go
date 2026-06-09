@@ -462,6 +462,12 @@ func datasourceSearchExample(plugin, entity string) string {
 type operationInputSchema struct {
 	Required   []string                       `json:"required"`
 	Properties map[string]operationInputField `json:"properties"`
+	// Examples are JSON Schema example objects. When an operation declares one,
+	// it is used verbatim for the skill's invocation example — the only way to
+	// produce a runnable example for operations with one-of input requirements
+	// (e.g. provide exactly one of transition_id / transition_name) that a flat
+	// required list cannot express.
+	Examples []map[string]any `json:"examples"`
 }
 
 type operationInputField struct {
@@ -479,6 +485,13 @@ func parseOperationInputSchema(op sdkmanifest.OperationSpec) operationInputSchem
 }
 
 func sampleInputJSON(schema operationInputSchema) string {
+	// A schema-declared example is authoritative: it is the only form that can
+	// express one-of input requirements as a runnable invocation.
+	for _, example := range schema.Examples {
+		if len(example) > 0 {
+			return compactJSON(example)
+		}
+	}
 	obj := map[string]any{}
 	for _, field := range schema.Required {
 		obj[field] = samplePlaceholder(schemaFieldType(schema.Properties[field]))
@@ -684,6 +697,7 @@ var skillStateChangingCommands = map[string]bool{
 	"fluxplane-plugin auth connect auto": true,
 	"fluxplane-plugin auth test":         true,
 	"fluxplane-plugin auth disconnect":   true,
+	"fluxplane-plugin dev sync":          true,
 }
 
 // refreshSkillsAfterStateChange regenerates installed skills after a successful,

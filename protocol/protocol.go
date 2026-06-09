@@ -91,6 +91,12 @@ type Frame struct {
 type Error struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
+	// Fields carries field-level error detail (field name -> reason) so callers
+	// can identify the offending input programmatically instead of parsing the
+	// message string — e.g. an upstream API's per-field validation errors.
+	Fields map[string]string `json:"fields,omitempty"`
+	// Details carries additional non-field messages an upstream returned.
+	Details []string `json:"details,omitempty"`
 }
 
 type OperationCall struct {

@@ -136,6 +136,33 @@ type RemoveResult struct {
 	Message string `json:"message,omitempty"`
 }
 
+// SyncRequest asks the backend to rebuild installed plugins from their recorded
+// workspace local_path, bypassing the marketplace catalog entirely. This is the
+// dev-loop counterpart to install: it is immune to a stale cached marketplace.json
+// (whose entries carry no usable local_path) because it reads each plugin's
+// stored local_path/binary labels directly.
+type SyncRequest struct {
+	Refs   []Ref `json:"refs,omitempty"`
+	All    bool  `json:"all,omitempty"`
+	DryRun bool  `json:"dry_run,omitempty"`
+}
+
+// SyncPluginResult describes the outcome of rebuilding one plugin from source.
+type SyncPluginResult struct {
+	Plugin     Ref    `json:"plugin"`
+	Rebuilt    bool   `json:"rebuilt,omitempty"`
+	Skipped    bool   `json:"skipped,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	LocalPath  string `json:"local_path,omitempty"`
+	BinaryPath string `json:"binary_path,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// SyncResult aggregates per-plugin rebuild outcomes.
+type SyncResult struct {
+	Plugins []SyncPluginResult `json:"plugins"`
+}
+
 // SearchRequest describes a plugin registry search.
 type SearchRequest struct {
 	Query string `json:"query,omitempty"`
@@ -555,6 +582,13 @@ type EndpointRemoveResult struct {
 type Installer interface {
 	InstallPlugin(context.Context, InstallRequest) (InstallResult, error)
 	UpdatePlugin(context.Context, UpdateRequest) (UpdateResult, error)
+}
+
+// LocalSyncer is an optional backend capability that rebuilds installed plugins
+// from their recorded workspace local_path. Backends that support a dev loop
+// implement it; the CLI detects it via a type assertion.
+type LocalSyncer interface {
+	SyncLocalPlugins(context.Context, SyncRequest) (SyncResult, error)
 }
 
 // Store lists, inspects, activates, and removes installed plugins.

@@ -73,6 +73,9 @@ func New(opts Options) *cobra.Command {
 		newRunCommand(opts.Backend),
 		newSkillCommand(opts.Backend),
 		newUpgradeCommand(opts.Backend),
+		newDevCommand(opts.Backend),
+		newDoctorCommand(opts.Backend),
+		newSelftestCommand(opts.Backend),
 	)
 	return cmd
 }

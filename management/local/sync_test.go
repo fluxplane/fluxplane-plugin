@@ -1,0 +1,140 @@
+package local
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/fluxplane/fluxplane-plugin/management"
+)
+
+// writeWorkspacePlugin creates a minimal standalone Go module with a
+// cmd/<binary>/main.go so SyncLocalPlugins has something real to build.
+func writeWorkspacePlugin(t *testing.T, binary string) string {
+	t.Helper()
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "go.mod"), "module example.com/"+binary+"\n\ngo 1.23\n")
+	mustWrite(t, filepath.Join(dir, "cmd", binary, "main.go"), "package main\n\nfunc main() {}\n")
+	return dir
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installWorkspacePlugin(t *testing.T, backend *Backend, name, localPath, binary, binPath string) {
+	t.Helper()
+	labels := map[string]string{"binary": binary}
+	if localPath != "" {
+		labels["local_path"] = localPath
+	}
+	if binPath != "" {
+		labels["installed_binary_path"] = binPath
+	}
+	_, err := backend.InstallPlugin(context.Background(), management.InstallRequest{
+		Ref:     management.Ref{Name: name},
+		Runtime: management.RuntimeSpec{Kind: "stdio", Command: binary},
+		Labels:  labels,
+	})
+	if err != nil {
+		t.Fatalf("install %s: %v", name, err)
+	}
+}
+
+func findSync(results []management.SyncPluginResult, name string) (management.SyncPluginResult, bool) {
+	for _, r := range results {
+		if r.Plugin.Name == name {
+			return r, true
+		}
+	}
+	return management.SyncPluginResult{}, false
+}
+
+func TestSyncLocalPluginsSkipsWithoutLocalPath(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	installWorkspacePlugin(t, backend, "remoteonly", "", "remoteonly", "")
+
+	res, err := backend.SyncLocalPlugins(context.Background(), management.SyncRequest{All: true})
+	if err != nil {
+		t.Fatalf("SyncLocalPlugins: %v", err)
+	}
+	got, ok := findSync(res.Plugins, "remoteonly")
+	if !ok || !got.Skipped || got.Rebuilt {
+		t.Fatalf("expected skipped, got %#v", got)
+	}
+}
+
+func TestSyncLocalPluginsDryRunDoesNotBuild(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ws := writeWorkspacePlugin(t, "probe")
+	binPath := filepath.Join(t.TempDir(), "probe-bin")
+	installWorkspacePlugin(t, backend, "probe", ws, "probe", binPath)
+
+	res, err := backend.SyncLocalPlugins(context.Background(), management.SyncRequest{All: true, DryRun: true})
+	if err != nil {
+		t.Fatalf("SyncLocalPlugins: %v", err)
+	}
+	got, ok := findSync(res.Plugins, "probe")
+	if !ok || got.Skipped || got.Rebuilt {
+		t.Fatalf("dry run should be a planned rebuild, got %#v", got)
+	}
+	if got.BinaryPath != binPath {
+		t.Fatalf("binary path = %q, want %q", got.BinaryPath, binPath)
+	}
+	if _, statErr := os.Stat(binPath); statErr == nil {
+		t.Fatalf("dry run must not produce a binary at %s", binPath)
+	}
+}
+
+func TestSyncLocalPluginsRebuildsFromWorkspace(t *testing.T) {
+	// Build the temp module standalone so the repo's go.work does not reject a
+	// module that is not one of its workspace members.
+	t.Setenv("GOWORK", "off")
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ws := writeWorkspacePlugin(t, "probe")
+	binPath := filepath.Join(t.TempDir(), "probe-bin")
+	installWorkspacePlugin(t, backend, "probe", ws, "probe", binPath)
+
+	res, err := backend.SyncLocalPlugins(context.Background(), management.SyncRequest{Refs: []management.Ref{{Name: "probe"}}})
+	if err != nil {
+		t.Fatalf("SyncLocalPlugins: %v", err)
+	}
+	got, ok := findSync(res.Plugins, "probe")
+	if !ok || !got.Rebuilt || got.Error != "" {
+		t.Fatalf("expected rebuilt, got %#v", got)
+	}
+	if _, statErr := os.Stat(binPath); statErr != nil {
+		t.Fatalf("expected binary at %s: %v", binPath, statErr)
+	}
+}
+
+func TestSyncLocalPluginsReportsUnknownNamed(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := backend.SyncLocalPlugins(context.Background(), management.SyncRequest{Refs: []management.Ref{{Name: "ghost"}}})
+	if err != nil {
+		t.Fatalf("SyncLocalPlugins: %v", err)
+	}
+	got, ok := findSync(res.Plugins, "ghost")
+	if !ok || !got.Skipped || got.Reason != "not installed" {
+		t.Fatalf("expected not-installed skip, got %#v", got)
+	}
+}
