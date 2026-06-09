@@ -9,6 +9,7 @@ const (
 	CapabilityEnvLookup = sdkhost.CapabilityEnvLookup
 	CapabilityProcess   = sdkhost.CapabilityProcess
 	CapabilityProvider  = sdkhost.CapabilityProvider
+	CapabilityConn      = sdkhost.CapabilityConn
 )
 
 type HTTPRequest = sdkhost.HTTPRequest
@@ -29,3 +30,13 @@ type ProcessStopRequest = sdkhost.ProcessStopRequest
 type ProcessStopResponse = sdkhost.ProcessStopResponse
 type ProviderCallRequest = sdkhost.ProviderCallRequest
 type ProviderCallResponse = sdkhost.ProviderCallResponse
+type ConnDialer = sdkhost.ConnDialer
+type ConnTLS = sdkhost.ConnTLS
+type ConnDialRequest = sdkhost.ConnDialRequest
+type ConnDialResponse = sdkhost.ConnDialResponse
+type ConnReadRequest = sdkhost.ConnReadRequest
+type ConnReadResponse = sdkhost.ConnReadResponse
+type ConnWriteRequest = sdkhost.ConnWriteRequest
+type ConnWriteResponse = sdkhost.ConnWriteResponse
+type ConnCloseRequest = sdkhost.ConnCloseRequest
+type ConnCloseResponse = sdkhost.ConnCloseResponse

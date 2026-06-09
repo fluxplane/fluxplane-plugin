@@ -13,6 +13,7 @@ const (
 	CapabilityEnvLookup = "env.lookup"
 	CapabilityProcess   = "process.run"
 	CapabilityProvider  = "provider.call"
+	CapabilityConn      = "conn.dial"
 )
 
 type HTTPRequest struct {
@@ -170,4 +171,63 @@ type ProviderCallRequest struct {
 
 type ProviderCallResponse struct {
 	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// ConnTLS configures optional host-terminated TLS for a dialed connection. When
+// Enabled, the host wraps the raw connection in a TLS client and the plugin
+// reads/writes plaintext. Most plugins leave this nil and let their own library
+// (database/sql driver, client-go, docker SDK) negotiate TLS over the raw stream.
+type ConnTLS struct {
+	Enabled            bool   `json:"enabled,omitempty"`
+	ServerName         string `json:"server_name,omitempty"`
+	InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
+}
+
+// ConnDialRequest asks the host to open a byte stream to a tcp host:port or a
+// unix socket path. The host owns the actual syscall so every connection crosses
+// the safety boundary; the plugin speaks its own protocol over the returned
+// handle. Address may be supplied directly or resolved from a registered
+// endpoint via EndpointRef (never from the environment at call time).
+type ConnDialRequest struct {
+	Network     string   `json:"network"`               // "tcp" | "unix"
+	Address     string   `json:"address,omitempty"`     // host:port or socket path
+	EndpointRef string   `json:"endpoint_ref,omitempty"`
+	TLS         *ConnTLS `json:"tls,omitempty"`
+	TimeoutMS   int      `json:"timeout_ms,omitempty"`
+}
+
+type ConnDialResponse struct {
+	ID         string `json:"id"`
+	Network    string `json:"network,omitempty"`
+	LocalAddr  string `json:"local_addr,omitempty"`
+	RemoteAddr string `json:"remote_addr,omitempty"`
+}
+
+type ConnReadRequest struct {
+	ID        string `json:"id"`
+	MaxBytes  int    `json:"max_bytes,omitempty"`
+	TimeoutMS int    `json:"timeout_ms,omitempty"`
+}
+
+type ConnReadResponse struct {
+	Data []byte `json:"data,omitempty"`
+	EOF  bool   `json:"eof,omitempty"`
+}
+
+type ConnWriteRequest struct {
+	ID        string `json:"id"`
+	Data      []byte `json:"data,omitempty"`
+	TimeoutMS int    `json:"timeout_ms,omitempty"`
+}
+
+type ConnWriteResponse struct {
+	Written int `json:"written"`
+}
+
+type ConnCloseRequest struct {
+	ID string `json:"id"`
+}
+
+type ConnCloseResponse struct {
+	Closed bool `json:"closed"`
 }

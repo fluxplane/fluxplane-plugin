@@ -300,6 +300,16 @@ func (p StdioPlugin) invokeFramed(ctx context.Context, req protocol.Request, cal
 		return protocol.Response{}, err
 	}
 	enc := json.NewEncoder(stdin)
+	// encMu serializes frame writes to the plugin's stdin: capability requests
+	// are handled on their own goroutines (see the FrameRequest case) so a
+	// blocking host call — e.g. a conn read waiting on a socket — cannot stall a
+	// concurrent conn write on the same connection.
+	var encMu sync.Mutex
+	writeFrame := func(f protocol.Frame) error {
+		encMu.Lock()
+		defer encMu.Unlock()
+		return enc.Encode(f)
+	}
 	stdoutLimit := &limitedReadCloser{ReadCloser: stdout, remaining: p.outputLimit()}
 	dec := json.NewDecoder(stdoutLimit)
 	frame, err := protocol.NewRequestFrame("root", protocol.TargetPlugin, req.Command, req)
@@ -308,7 +318,7 @@ func (p StdioPlugin) invokeFramed(ctx context.Context, req protocol.Request, cal
 		_ = cmd.Wait()
 		return protocol.Response{}, err
 	}
-	if err := enc.Encode(frame); err != nil {
+	if err := writeFrame(frame); err != nil {
 		_ = stdin.Close()
 		_ = cmd.Wait()
 		return protocol.Response{}, err
@@ -367,12 +377,15 @@ func (p StdioPlugin) invokeFramed(ctx context.Context, req protocol.Request, cal
 			}
 			return resp, nil
 		case protocol.FrameRequest:
-			resp := callHost(caller, frame)
-			if err := enc.Encode(protocol.NewResponseFrame(frame.ID, resp)); err != nil {
-				_ = stdin.Close()
-				_ = cmd.Wait()
-				return protocol.Response{}, err
-			}
+			// Handle each host capability call concurrently so that long or
+			// blocking calls (notably conn reads/writes that a plugin's HTTP or
+			// DB client drives from separate goroutines) do not serialize and
+			// deadlock against one another. Writes are serialized by writeFrame.
+			reqFrame := frame
+			go func() {
+				resp := callHost(caller, reqFrame)
+				_ = writeFrame(protocol.NewResponseFrame(reqFrame.ID, resp))
+			}()
 		case protocol.FrameEvent:
 			if caller != nil {
 				_ = caller.EmitHostEvent(strings.TrimSpace(frame.Command), frame.Payload)

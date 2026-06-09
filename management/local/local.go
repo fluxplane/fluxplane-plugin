@@ -916,11 +916,95 @@ func (b *Backend) InvokeOperation(ctx context.Context, req management.OperationI
 		return management.OperationInvokeResult{}, err
 	}
 	instance := normalizeInstance(req.Instance)
-	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsCall, protocol.OperationCall{Name: strings.TrimSpace(req.Operation), Input: copyRaw(req.Input)})
+	input := b.resolveOperationEndpoint(req.Ref, instance, copyRaw(req.Input))
+	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsCall, protocol.OperationCall{Name: strings.TrimSpace(req.Operation), Input: input})
 	if err != nil {
 		return management.OperationInvokeResult{}, err
 	}
 	return management.OperationInvokeResult{Plugin: req.Ref, Instance: instance, Operation: strings.TrimSpace(req.Operation), Result: copyRaw(resp.Result)}, nil
+}
+
+// resolveOperationEndpoint injects a default endpoint_ref into an operation input
+// when the caller omitted one. The default is taken from durable state only — the
+// instance's wired endpoint (set during auth connect), else the single stored
+// endpoint registered for the plugin's product — so endpoint selection stays
+// deterministic and never depends on the environment at call time. Every operation
+// input schema carries an endpoint_ref property, so the injection is always
+// schema-valid; operations that ignore endpoint_ref are unaffected. When the
+// product has multiple stored endpoints the choice is ambiguous and the caller
+// must pass an explicit endpoint_ref.
+func (b *Backend) resolveOperationEndpoint(ref management.Ref, instance string, input json.RawMessage) json.RawMessage {
+	if endpointRefFromInput(input) != "" {
+		return input
+	}
+	resolved := b.defaultEndpointRef(ref, instance)
+	if resolved == "" {
+		return input
+	}
+	return injectEndpointRef(input, resolved)
+}
+
+func (b *Backend) defaultEndpointRef(ref management.Ref, instance string) string {
+	if cfg := b.instanceConfig(ref, instance); cfg != nil {
+		if v, ok := cfg["endpoint_ref"].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	product := strings.TrimSpace(ref.Name)
+	if product == "" {
+		return ""
+	}
+	st, err := b.readState()
+	if err != nil {
+		return ""
+	}
+	var match string
+	for _, stored := range st.Endpoints {
+		if !strings.EqualFold(strings.TrimSpace(stored.Endpoint.Product), product) {
+			continue
+		}
+		id := strings.TrimSpace(stored.Endpoint.ID)
+		if id == "" {
+			continue
+		}
+		if match != "" && !strings.EqualFold(match, id) {
+			return "" // ambiguous: more than one endpoint for this product
+		}
+		match = id
+	}
+	return match
+}
+
+func endpointRefFromInput(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var probe struct {
+		EndpointRef string `json:"endpoint_ref"`
+	}
+	if err := json.Unmarshal(input, &probe); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(probe.EndpointRef)
+}
+
+func injectEndpointRef(input json.RawMessage, ref string) json.RawMessage {
+	obj := map[string]json.RawMessage{}
+	if len(input) > 0 {
+		if err := json.Unmarshal(input, &obj); err != nil {
+			return input // not a JSON object; leave the payload untouched
+		}
+	}
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		return input
+	}
+	obj["endpoint_ref"] = encoded
+	merged, err := json.Marshal(obj)
+	if err != nil {
+		return input
+	}
+	return merged
 }
 
 // BatchOperations calls multiple operations on one plugin runtime invocation.
@@ -945,6 +1029,9 @@ func (b *Backend) BatchOperations(ctx context.Context, req management.OperationB
 		return management.OperationBatchResult{}, err
 	}
 	instance := normalizeInstance(req.Instance)
+	for i := range calls {
+		calls[i].Input = b.resolveOperationEndpoint(req.Ref, instance, calls[i].Input)
+	}
 	resp, err := b.invokePlugin(ctx, plugin, instance, protocol.CommandOperationsBatch, protocol.OperationBatch{Calls: calls})
 	if err != nil {
 		return management.OperationBatchResult{}, err
@@ -1322,10 +1409,12 @@ func (b *Backend) invokePlugin(ctx context.Context, plugin storedPlugin, instanc
 	if err != nil {
 		return protocol.Response{}, err
 	}
+	conns := newConnRegistry()
+	defer conns.closeAll()
 	resp, err := host.Invoke(ctx, plugin.Ref.Name, command, payload,
 		pluginruntime.WithInstance(normalizeInstance(instance)),
 		pluginruntime.WithConfig(b.instanceConfig(plugin.Ref, instance)),
-		pluginruntime.WithHostCaller(cliHost{backend: b, plugin: plugin.Ref.Name, instance: normalizeInstance(instance)}),
+		pluginruntime.WithHostCaller(cliHost{backend: b, plugin: plugin.Ref.Name, instance: normalizeInstance(instance), conns: conns}),
 	)
 	if err != nil {
 		return resp, fmt.Errorf("fluxplane-plugin: invoke %s on plugin %q: %w", command, plugin.Ref.Key(), err)
@@ -1346,6 +1435,7 @@ type cliHost struct {
 	backend  *Backend
 	plugin   string
 	instance string
+	conns    *connRegistry
 }
 
 func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) {
@@ -1408,6 +1498,30 @@ func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) 
 			return json.Marshal(sdkhost.ProviderCallResponse{Result: result})
 		}
 		return nil, fmt.Errorf("unsupported provider call %s.%s", req.Provider, req.Action)
+	case protocol.HostCapabilityConnDial:
+		var req sdkhost.ConnDialRequest
+		if err := decodeHostPayload(payload, &req); err != nil {
+			return nil, err
+		}
+		return h.connDial(req)
+	case protocol.HostCapabilityConnRead:
+		var req sdkhost.ConnReadRequest
+		if err := decodeHostPayload(payload, &req); err != nil {
+			return nil, err
+		}
+		return h.connRead(req)
+	case protocol.HostCapabilityConnWrite:
+		var req sdkhost.ConnWriteRequest
+		if err := decodeHostPayload(payload, &req); err != nil {
+			return nil, err
+		}
+		return h.connWrite(req)
+	case protocol.HostCapabilityConnClose:
+		var req sdkhost.ConnCloseRequest
+		if err := decodeHostPayload(payload, &req); err != nil {
+			return nil, err
+		}
+		return h.connClose(req)
 	default:
 		return nil, fmt.Errorf("unsupported host capability %q", command)
 	}

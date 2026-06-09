@@ -37,6 +37,18 @@ type Client interface {
 	CapabilityCall(input ProviderCallRequest) (ProviderCallResponse, error)
 }
 
+// ConnDialer is an optional host capability for raw byte-stream connections
+// (tcp/unix, optional host-terminated TLS). It is kept separate from Client so
+// hosts and test doubles that do not need outbound sockets are unaffected;
+// callers type-assert a Client to ConnDialer (see pluginbinding.HostDialer).
+// The SDK-provided Client always satisfies it.
+type ConnDialer interface {
+	ConnDial(input ConnDialRequest) (ConnDialResponse, error)
+	ConnRead(input ConnReadRequest) (ConnReadResponse, error)
+	ConnWrite(input ConnWriteRequest) (ConnWriteResponse, error)
+	ConnClose(input ConnCloseRequest) (ConnCloseResponse, error)
+}
+
 type client struct {
 	caller protocol.HostCaller
 }
@@ -138,6 +150,30 @@ func (h client) CapabilityCall(input ProviderCallRequest) (ProviderCallResponse,
 	return out, err
 }
 
+func (h client) ConnDial(input ConnDialRequest) (ConnDialResponse, error) {
+	var out ConnDialResponse
+	err := h.call(protocol.HostCapabilityConnDial, input, &out)
+	return out, err
+}
+
+func (h client) ConnRead(input ConnReadRequest) (ConnReadResponse, error) {
+	var out ConnReadResponse
+	err := h.call(protocol.HostCapabilityConnRead, input, &out)
+	return out, err
+}
+
+func (h client) ConnWrite(input ConnWriteRequest) (ConnWriteResponse, error) {
+	var out ConnWriteResponse
+	err := h.call(protocol.HostCapabilityConnWrite, input, &out)
+	return out, err
+}
+
+func (h client) ConnClose(input ConnCloseRequest) (ConnCloseResponse, error) {
+	var out ConnCloseResponse
+	err := h.call(protocol.HostCapabilityConnClose, input, &out)
+	return out, err
+}
+
 func (h client) call(command string, input any, out any) error {
 	raw, err := h.caller.CallHost(command, input)
 	if err != nil {
@@ -203,4 +239,20 @@ func (unavailableClient) ProcessStop(ProcessStopRequest) (ProcessStopResponse, e
 
 func (unavailableClient) CapabilityCall(ProviderCallRequest) (ProviderCallResponse, error) {
 	return ProviderCallResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ConnDial(ConnDialRequest) (ConnDialResponse, error) {
+	return ConnDialResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ConnRead(ConnReadRequest) (ConnReadResponse, error) {
+	return ConnReadResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ConnWrite(ConnWriteRequest) (ConnWriteResponse, error) {
+	return ConnWriteResponse{}, fmt.Errorf("host client is unavailable")
+}
+
+func (unavailableClient) ConnClose(ConnCloseRequest) (ConnCloseResponse, error) {
+	return ConnCloseResponse{}, fmt.Errorf("host client is unavailable")
 }

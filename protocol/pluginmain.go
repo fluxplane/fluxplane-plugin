@@ -34,42 +34,106 @@ type frameHostClient struct {
 	dec     *json.Decoder
 	writeMu sync.Mutex
 	nextID  atomic.Uint64
+
+	mu       sync.Mutex
+	started  bool
+	readErr  error
+	waiters  map[string]chan Frame
+}
+
+// ensureReader starts the single background goroutine that owns the response
+// decoder and routes each host response frame to the matching in-flight caller
+// by id. This lets CallHost be invoked concurrently — required because a plugin
+// may drive a net/http transport (or any library) that reads and writes on a
+// host-dialed connection from separate goroutines at the same time.
+func (c *frameHostClient) ensureReader() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.started {
+		return
+	}
+	c.started = true
+	c.waiters = map[string]chan Frame{}
+	go c.readLoop()
+}
+
+func (c *frameHostClient) readLoop() {
+	for {
+		var resp Frame
+		err := c.dec.Decode(&resp)
+		c.mu.Lock()
+		if err != nil {
+			c.readErr = err
+			waiters := c.waiters
+			c.waiters = map[string]chan Frame{}
+			c.mu.Unlock()
+			for _, ch := range waiters {
+				close(ch)
+			}
+			return
+		}
+		ch := c.waiters[resp.ID]
+		delete(c.waiters, resp.ID)
+		c.mu.Unlock()
+		if ch != nil {
+			ch <- resp
+		}
+	}
 }
 
 func (c *frameHostClient) CallHost(command string, payload any) (json.RawMessage, error) {
 	if c == nil {
 		return nil, HostError{Code: "host_unavailable", Message: "host client is unavailable"}
 	}
+	c.ensureReader()
 	id := "host-" + strconv.FormatUint(c.nextID.Add(1), 10)
 	frame, err := NewRequestFrame(id, TargetHost, command, payload)
 	if err != nil {
 		return nil, err
 	}
+	ch := make(chan Frame, 1)
+	c.mu.Lock()
+	if c.readErr != nil {
+		err := c.readErr
+		c.mu.Unlock()
+		return nil, err
+	}
+	c.waiters[id] = ch
+	c.mu.Unlock()
+
 	c.writeMu.Lock()
 	err = c.enc.Encode(frame)
 	c.writeMu.Unlock()
 	if err != nil {
+		c.mu.Lock()
+		delete(c.waiters, id)
+		c.mu.Unlock()
 		return nil, err
 	}
-	for {
-		var resp Frame
-		if err := c.dec.Decode(&resp); err != nil {
-			return nil, err
+
+	resp, ok := <-ch
+	if !ok {
+		c.mu.Lock()
+		readErr := c.readErr
+		c.mu.Unlock()
+		if readErr != nil {
+			return nil, readErr
 		}
-		if resp.Protocol != Version {
-			return nil, HostError{Code: "protocol_mismatch", Message: fmt.Sprintf("expected %s, got %s", Version, resp.Protocol)}
-		}
-		if resp.Type != FrameResponse || resp.ID != id {
-			return nil, HostError{Code: "unexpected_frame", Message: "unexpected host frame"}
-		}
-		if !resp.OK {
-			if resp.Error != nil {
-				return nil, HostError{Code: resp.Error.Code, Message: resp.Error.Message}
-			}
-			return nil, HostError{Code: "host_error", Message: "host call failed"}
-		}
-		return resp.Result, nil
+		return nil, HostError{Code: "host_error", Message: "host call failed"}
 	}
+	if resp.Protocol != Version {
+		return nil, HostError{Code: "protocol_mismatch", Message: fmt.Sprintf("expected %s, got %s", Version, resp.Protocol)}
+	}
+	if resp.Type != FrameResponse {
+		return nil, HostError{Code: "unexpected_frame", Message: "unexpected host frame"}
+	}
+	if !resp.OK {
+		if resp.Error != nil {
+			return nil, HostError{Code: resp.Error.Code, Message: resp.Error.Message}
+		}
+		return nil, HostError{Code: "host_error", Message: "host call failed"}
+	}
+	return resp.Result, nil
 }
 
 func (c *frameHostClient) EmitHostEvent(event string, payload any) error {

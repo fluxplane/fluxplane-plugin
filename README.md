@@ -21,6 +21,34 @@ This SDK module is core-free and dex-free. Agent-runtime contribution bridging
 belongs in `fluxplane-core`; concrete plugin catalogs and binaries belong in
 `fluxplane-plugins`.
 
+## Host capabilities
+
+Plugins never perform direct IO. Every side effect is requested from the host
+over the framed protocol, which keeps plugins sandboxable and lets one generic
+host implementation serve every product (the standalone CLI, coder, slack-bot,
+any fp-core app). The capability set is intentionally generic — transport and OS
+primitives, never app-specific providers:
+
+- `http.do` — HTTP requests (most REST plugins use `pluginbinding.HostHTTPClient`).
+- `conn.dial` / `conn.read` / `conn.write` / `conn.close` — raw byte streams over
+  `tcp` or a `unix` socket, with optional host-terminated TLS. A plugin gets a
+  `net.Conn` via `pluginbinding.HostDialer(host)` and hands it to any library
+  that accepts a custom dialer (`database/sql` drivers, Kubernetes `client-go`,
+  the Docker SDK, an Asterisk AMI client). The protocol/wire logic lives in the
+  plugin; only the socket crosses the host boundary, where it can be audited and
+  policy-gated.
+- `process.run` / `process.start` / `process.stop` — child processes.
+- `blob.read` / `blob.write` / `blob.info`, `env.lookup`, `secret`, `endpoint`.
+
+The framed host channel multiplexes responses by request id, so a plugin may
+issue concurrent host calls — required when a library (e.g. `net/http`) drives a
+host-dialed connection from separate read and write goroutines.
+
+Endpoints resolve from durable state (auth-wired or registered), never from the
+environment at call time, so where a request is sent is deterministic. When an
+operation omits `endpoint_ref`, the local backend injects the instance's wired
+endpoint, or the single registered endpoint for the plugin's product.
+
 ## Target direction
 
 ```text

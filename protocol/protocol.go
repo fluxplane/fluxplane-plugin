@@ -49,6 +49,10 @@ const (
 	HostCapabilityProcessStart = "host.capability.process.start"
 	HostCapabilityProcessStop  = "host.capability.process.stop"
 	HostCapabilityProviderCall = "host.capability.provider.call"
+	HostCapabilityConnDial     = "host.capability.conn.dial"
+	HostCapabilityConnRead     = "host.capability.conn.read"
+	HostCapabilityConnWrite    = "host.capability.conn.write"
+	HostCapabilityConnClose    = "host.capability.conn.close"
 )
 
 type Request struct {
