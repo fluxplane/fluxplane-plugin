@@ -446,105 +446,11 @@ func dedupeSortedStrings(in []string) []string {
 	return out
 }
 
-func operationExample(plugin, operation string, schema operationInputSchema) string {
-	return fmt.Sprintf("fluxplane-plugin operation invoke %s %s --input '%s'", plugin, operation, sampleInputJSON(schema))
-}
-
 func datasourceSearchExample(plugin, entity string) string {
 	if entity != "" {
 		return fmt.Sprintf("fluxplane-plugin datasource search %s --input '{\"entity\":\"%s\",\"query\":\"...\"}'", plugin, entity)
 	}
 	return fmt.Sprintf("fluxplane-plugin datasource search %s --input '{\"query\":\"...\"}'", plugin)
-}
-
-// operationInputSchema is the minimal JSON-schema shape needed to surface an
-// operation's required input fields and field types in the skill.
-type operationInputSchema struct {
-	Required   []string                       `json:"required"`
-	Properties map[string]operationInputField `json:"properties"`
-	// Examples are JSON Schema example objects. When an operation declares one,
-	// it is used verbatim for the skill's invocation example — the only way to
-	// produce a runnable example for operations with one-of input requirements
-	// (e.g. provide exactly one of transition_id / transition_name) that a flat
-	// required list cannot express.
-	Examples []map[string]any `json:"examples"`
-}
-
-type operationInputField struct {
-	Type        any    `json:"type"`
-	Description string `json:"description"`
-}
-
-func parseOperationInputSchema(op sdkmanifest.OperationSpec) operationInputSchema {
-	var schema operationInputSchema
-	_ = json.Unmarshal(op.Input, &schema)
-	if schema.Properties == nil {
-		schema.Properties = map[string]operationInputField{}
-	}
-	return schema
-}
-
-func sampleInputJSON(schema operationInputSchema) string {
-	// A schema-declared example is authoritative: it is the only form that can
-	// express one-of input requirements as a runnable invocation.
-	for _, example := range schema.Examples {
-		if len(example) > 0 {
-			return compactJSON(example)
-		}
-	}
-	obj := map[string]any{}
-	for _, field := range schema.Required {
-		obj[field] = samplePlaceholder(schemaFieldType(schema.Properties[field]))
-	}
-	// Many operations resolve a target instance from endpoint_ref even when the
-	// advertised schema does not mark it required; surface it so examples work.
-	if _, ok := schema.Properties["endpoint_ref"]; ok {
-		if _, set := obj["endpoint_ref"]; !set {
-			obj["endpoint_ref"] = "<endpoint_ref>"
-		}
-	}
-	return compactJSON(obj)
-}
-
-// compactJSON marshals to compact JSON without HTML-escaping so placeholders
-// like <endpoint_ref> render literally instead of as <.
-func compactJSON(v any) string {
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return "{}"
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func samplePlaceholder(fieldType string) any {
-	switch fieldType {
-	case "integer", "number":
-		return 0
-	case "boolean":
-		return false
-	case "array":
-		return []any{}
-	case "object":
-		return map[string]any{}
-	default:
-		return ""
-	}
-}
-
-func schemaFieldType(spec operationInputField) string {
-	switch value := spec.Type.(type) {
-	case string:
-		return strings.TrimSpace(value)
-	case []any:
-		for _, item := range value {
-			if text, ok := item.(string); ok && text != "null" {
-				return strings.TrimSpace(text)
-			}
-		}
-	}
-	return "string"
 }
 
 type skillInstallOptions struct {
@@ -824,7 +730,9 @@ const skillCheatSheet = `## Core commands
 - {{code "fluxplane-plugin search"}} — discover plugins in the marketplace catalog.
 - {{code "fluxplane-plugin install <plugin>"}} — install a discoverable plugin.
 - {{code "fluxplane-plugin operation list <plugin>"}} — operations a plugin exposes (with input schema).
-- {{code "fluxplane-plugin operation invoke <plugin> <operation> --input {...}"}} — call an operation; input is a JSON object.
+- {{code "fluxplane-plugin operation search <query>"}} — find an operation across installed plugins by keyword.
+- {{code "fluxplane-plugin operation describe <plugin> <operation>"}} — one operation's input fields, types, enums, a runnable example, and risk/auth (read this before invoking).
+- {{code "fluxplane-plugin operation invoke <plugin> <operation> --input {...}"}} — call an operation; input is a JSON object. Add {{code "--dry-run"}} to validate input locally first, {{code "--result-only"}} or {{code "--field <dot.path>"}} to trim the output.
 - {{code "fluxplane-plugin datasource search-all <query>"}} — search every searchable datasource at once.
 - {{code "fluxplane-plugin lookup <text-or-url>"}} — resolve a URL or name to a canonical record.
 - {{code "fluxplane-plugin context build-all <query>"}} — gather context from context providers.

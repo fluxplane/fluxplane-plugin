@@ -2,6 +2,33 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.5.0
+
+### Added — agent-ergonomic operation tooling
+
+- **`operation describe PLUGIN OPERATION`** — a compact, agent-friendly spec for
+  one operation: each input field with type, required/optional, allowed enum
+  values, and a one-line description; a runnable invocation example; the output's
+  top-level keys; and risk/idempotency/effects/auth metadata. Read this instead
+  of the raw `input_schema`. `--json` for the structured form.
+- **`operation search QUERY`** — keyword search across installed plugins' op
+  names + descriptions (all whitespace terms must match), ranked best-first.
+  `--plugin` restricts the search, `--read-only` filters, `--json` for structure.
+- **`operation invoke --dry-run`** — validate `--input` against the operation's
+  schema locally and report, without calling the backend. Validation is
+  conservative/high-confidence (top-level missing-required, enum violations, and
+  unknown keys when `additionalProperties:false`); it skips when the op declares
+  a schema example (one-of inputs). By default a real invoke fails fast on these
+  problems before any backend round-trip; `--no-validate` opts out, and a schema
+  it can't discover never blocks a valid call.
+- **`operation invoke --result-only` / `--field <dot.path[,…]>`** — print just the
+  result (drop the envelope) or extract specific values by dot-path (e.g.
+  `user.displayName`, `rows.0.ok`), so callers stop hand-extracting JSON.
+
+### Changed
+- The skill cheat-sheet now points at `operation describe` and `operation search`
+  as the on-demand way to learn an operation's exact input shape.
+
 ## v0.4.1
 
 ### Fixed

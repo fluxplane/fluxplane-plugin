@@ -35,6 +35,15 @@ type fakeBackend struct {
 	endpointSaved    management.EndpointSaveRequest
 	endpointHealth   management.EndpointHealthRequest
 	endpointRemoved  management.EndpointRemoveRequest
+
+	// Optional overrides for operation discovery/invocation. When nil the default
+	// fixed behavior is used. invokeCount records InvokeOperation calls so tests
+	// (e.g. dry-run) can assert none were made; listOpsReqs records the refs
+	// queried (so search tests can assert --plugin filtering).
+	listOpsFn   func(management.OperationListRequest) (management.OperationListResult, error)
+	invokeFn    func(management.OperationInvokeRequest) (management.OperationInvokeResult, error)
+	listOpsReqs []management.OperationListRequest
+	invokeCount int
 }
 
 func (f *fakeBackend) InstallPlugin(_ context.Context, req management.InstallRequest) (management.InstallResult, error) {
@@ -103,11 +112,19 @@ func (f *fakeBackend) AuthDisconnect(_ context.Context, req management.AuthDisco
 }
 
 func (f *fakeBackend) ListOperations(_ context.Context, req management.OperationListRequest) (management.OperationListResult, error) {
+	f.listOpsReqs = append(f.listOpsReqs, req)
+	if f.listOpsFn != nil {
+		return f.listOpsFn(req)
+	}
 	return management.OperationListResult{Plugin: req.Ref, Instance: req.Instance}, nil
 }
 
 func (f *fakeBackend) InvokeOperation(_ context.Context, req management.OperationInvokeRequest) (management.OperationInvokeResult, error) {
 	f.invoked = req
+	f.invokeCount++
+	if f.invokeFn != nil {
+		return f.invokeFn(req)
+	}
 	return management.OperationInvokeResult{Plugin: req.Ref, Instance: req.Instance, Operation: req.Operation, Result: []byte(`{"ok":true,"endpoint_url":"https://user:secret@example.test","rows":[{"ok":true}]}`)}, nil
 }
 

@@ -808,6 +808,8 @@ func newOperationCommand(backend management.Backend) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newOperationListCommand(backend),
+		newOperationDescribeCommand(backend),
+		newOperationSearchCommand(backend),
 		newOperationInvokeCommand(backend),
 		newOperationBatchCommand(backend),
 	)
@@ -839,6 +841,10 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	var instance string
 	var input string
 	var inputFile string
+	var dryRun bool
+	var noValidate bool
+	var resultOnly bool
+	var fields string
 	cmd := &cobra.Command{
 		Use:     "invoke PLUGIN[@VERSION] OPERATION",
 		Aliases: []string{"run", "call"},
@@ -848,21 +854,82 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 			if err := backendRequired(backend); err != nil {
 				return err
 			}
+			ref := parseRef(args[0])
+			opName := args[1]
 			payload, err := readJSONPayload(input, inputFile)
 			if err != nil {
 				return err
 			}
-			result, err := backend.InvokeOperation(cmd.Context(), management.OperationInvokeRequest{Ref: parseRef(args[0]), Instance: instance, Operation: args[1], Input: payload})
+
+			// Local pre-validation against the operation's schema. Schema discovery
+			// failures are non-fatal for a real invoke (never block a valid call),
+			// but surfaced under --dry-run.
+			if !noValidate {
+				schema, found, derr := operationSchema(cmd.Context(), backend, ref, instance, opName)
+				if derr != nil && dryRun {
+					return derr
+				}
+				if found {
+					problems := validateOperationInput(schema, payload)
+					if dryRun {
+						return printJSON(cmd.OutOrStdout(), operationDryRunResult{
+							Plugin: ref.Name, Operation: opName, Valid: len(problems) == 0, Problems: problems, Input: payload,
+						})
+					}
+					if len(problems) > 0 {
+						_ = printJSON(cmd.ErrOrStderr(), protocol.Error{Code: "invalid_input", Message: "input failed local validation", Fields: problemFields(problems)})
+						return fmt.Errorf("fluxplane-plugin: input failed local validation for %s %s", ref.Name, opName)
+					}
+				} else if dryRun {
+					return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: payload})
+				}
+			} else if dryRun {
+				return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: payload})
+			}
+
+			result, err := backend.InvokeOperation(cmd.Context(), management.OperationInvokeRequest{Ref: ref, Instance: instance, Operation: opName, Input: payload})
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			return printOperationResult(cmd.OutOrStdout(), result, resultOnly, splitFieldPaths(fields))
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", management.DefaultInstance, "plugin instance")
 	cmd.Flags().StringVar(&input, "input", "", "operation input JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation input JSON file")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate input locally and report; do not call the backend")
+	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation")
+	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
+	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result (e.g. key,issue.fields.status.name)")
 	return cmd
+}
+
+// operationSchema resolves an operation's parsed input schema via the backend.
+// Returns (schema, found, err); found is false when the op isn't advertised.
+func operationSchema(ctx context.Context, backend management.Backend, ref management.Ref, instance, opName string) (operationInputSchema, bool, error) {
+	list, err := backend.ListOperations(ctx, management.OperationListRequest{Ref: ref, Instance: instance})
+	if err != nil {
+		return operationInputSchema{}, false, err
+	}
+	name := strings.TrimSpace(opName)
+	for _, op := range list.Operations {
+		if strings.TrimSpace(op.Name) == name {
+			return parseOperationInputSchema(op), true, nil
+		}
+	}
+	return operationInputSchema{}, false, nil
+}
+
+func problemFields(problems []validationProblem) map[string]string {
+	out := map[string]string{}
+	for _, p := range problems {
+		key := p.Field
+		if key == "" {
+			key = "_"
+		}
+		out[key] = p.Reason
+	}
+	return out
 }
 
 func newOperationBatchCommand(backend management.Backend) *cobra.Command {
