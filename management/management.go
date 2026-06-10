@@ -392,12 +392,15 @@ type DatasourceCallRequest struct {
 	Input      json.RawMessage `json:"input,omitempty"`
 }
 
-// DatasourceCallResult contains a datasource capability result payload.
+// DatasourceCallResult contains a datasource capability result payload. Hint,
+// when set, carries an actionable remedy alongside an otherwise valid result
+// (e.g. a lookup served without a built index).
 type DatasourceCallResult struct {
 	Plugin     Ref             `json:"plugin"`
 	Instance   string          `json:"instance"`
 	Capability string          `json:"capability"`
 	Result     json.RawMessage `json:"result,omitempty"`
+	Hint       string          `json:"hint,omitempty"`
 }
 
 // ContextListRequest describes a context provider listing request.

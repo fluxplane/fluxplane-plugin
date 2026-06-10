@@ -28,8 +28,14 @@ type operationDescription struct {
 	Secrets     []string                `json:"secret_purposes,omitempty"`
 	Fields      []operationFieldSummary `json:"input_fields,omitempty"`
 	Example     string                  `json:"example"`
-	OutputKeys  []string                `json:"output_keys,omitempty"`
-	OutputRaw   json.RawMessage         `json:"output_schema,omitempty"`
+	// OutputFields summarizes the result shape (top-level plus one nesting
+	// level); Pagination lists the truncation signals present so an agent can
+	// tell a paginating operation at a glance. OutputKeys/OutputRaw stay for
+	// backward compatibility and the raw-schema escape hatch.
+	OutputFields []operationOutputFieldSummary `json:"output_fields,omitempty"`
+	Pagination   []string                      `json:"pagination_fields,omitempty"`
+	OutputKeys   []string                      `json:"output_keys,omitempty"`
+	OutputRaw    json.RawMessage               `json:"output_schema,omitempty"`
 }
 
 func describeOperation(plugin string, op sdkmanifest.OperationSpec) operationDescription {
@@ -50,6 +56,7 @@ func describeOperation(plugin string, op sdkmanifest.OperationSpec) operationDes
 		OutputKeys:  topLevelSchemaKeys(op.Output),
 		OutputRaw:   nonEmptyJSON(op.Output),
 	}
+	desc.OutputFields, desc.Pagination = summarizeOperationOutput(op.Output)
 	return desc
 }
 
@@ -149,11 +156,35 @@ func renderOperationDescription(w io.Writer, d operationDescription) error {
 	}
 
 	fmt.Fprintln(&b, "  example: "+d.Example)
-	if len(d.OutputKeys) > 0 {
+	switch {
+	case len(d.OutputFields) > 0:
+		fmt.Fprintln(&b, "  output:")
+		for _, f := range d.OutputFields {
+			fmt.Fprintln(&b, "    "+outputFieldLine(f))
+			for _, child := range f.Fields {
+				fmt.Fprintln(&b, "      "+outputFieldLine(child))
+			}
+		}
+		if len(d.Pagination) > 0 {
+			fmt.Fprintln(&b, "  paginates: "+strings.Join(d.Pagination, ", ")+" — partial results are signaled; fetch more when set")
+		}
+	case len(d.OutputKeys) > 0:
 		fmt.Fprintln(&b, "  output keys: "+strings.Join(d.OutputKeys, ", "))
 	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+func outputFieldLine(f operationOutputFieldSummary) string {
+	kind := f.Type
+	if f.Items != "" {
+		kind += "[" + f.Items + "]"
+	}
+	line := fmt.Sprintf("%s  %s", f.Name, kind)
+	if f.Description != "" {
+		line += "  — " + f.Description
+	}
+	return line
 }
 
 func joinEnum(values []any) string {

@@ -875,20 +875,32 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 			}
 			ref := parseRef(args[0])
 			opName := args[1]
-			payload, err := buildInvokeInput(input, inputFile, argVals, cmd.InOrStdin())
+
+			// The operation schema is fetched once (the backend caches operation
+			// listings) and serves two purposes: coercing --arg values to their
+			// declared types while building the input, and local pre-validation.
+			// Discovery failures are non-fatal for a real invoke (never block a
+			// valid call), but surfaced under --dry-run.
+			var schema operationInputSchema
+			var schemaFound bool
+			var schemaErr error
+			if !noValidate || len(argVals) > 0 {
+				schema, schemaFound, schemaErr = operationSchema(cmd.Context(), backend, ref, instance, opName)
+			}
+			var schemaPtr *operationInputSchema
+			if schemaFound {
+				schemaPtr = &schema
+			}
+			payload, err := buildInvokeInput(input, inputFile, argVals, cmd.InOrStdin(), schemaPtr)
 			if err != nil {
 				return err
 			}
 
-			// Local pre-validation against the operation's schema. Schema discovery
-			// failures are non-fatal for a real invoke (never block a valid call),
-			// but surfaced under --dry-run.
 			if !noValidate {
-				schema, found, derr := operationSchema(cmd.Context(), backend, ref, instance, opName)
-				if derr != nil && dryRun {
-					return derr
+				if schemaErr != nil && dryRun {
+					return schemaErr
 				}
-				if found {
+				if schemaFound {
 					problems := validateOperationInput(schema, payload)
 					if dryRun {
 						return printJSON(cmd.OutOrStdout(), operationDryRunResult{
@@ -930,7 +942,7 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&input, "input", "", "operation input JSON (\"-\" reads stdin)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation input JSON file")
-	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "set an input field as key=value; dotted keys nest (e.g. --arg fields.priority=High); values parse as JSON when valid")
+	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "set an input field as key=value; dotted keys nest (e.g. --arg fields.priority=High); values coerce to the operation schema's declared type (declared-string fields keep the raw text), else parse as JSON when valid")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate input locally and report; do not call the backend")
 	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation")
 	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
@@ -1348,6 +1360,7 @@ type fanoutCallResult struct {
 	Plugin   management.Ref  `json:"plugin"`
 	Instance string          `json:"instance,omitempty"`
 	Result   json.RawMessage `json:"result,omitempty"`
+	Hint     string          `json:"hint,omitempty"`
 	Error    string          `json:"error,omitempty"`
 }
 
@@ -1369,6 +1382,7 @@ func fanoutDatasource(ctx context.Context, backend management.Backend, capabilit
 			result.Error = err.Error()
 		} else {
 			result.Result = copyRaw(call.Result)
+			result.Hint = call.Hint
 		}
 		out[i] = result
 	})

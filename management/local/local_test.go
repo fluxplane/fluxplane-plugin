@@ -496,6 +496,21 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if len(built.Blocks) != 1 || built.Blocks[0].Content != "context Ada" {
 		t.Fatalf("context result = %#v", built)
 	}
+	// Before any index is built, a lookup falls through to the plugin and the
+	// result carries an actionable hint (the manifest declares indexes).
+	preLookup, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "lookup", Input: []byte(`{"text":"open item B","entity":"test.item"}`)})
+	if err != nil {
+		t.Fatalf("CallDatasource lookup before build: %v", err)
+	}
+	if !strings.Contains(preLookup.Hint, "index build test") {
+		t.Fatalf("expected index-build hint before build, got %q", preLookup.Hint)
+	}
+	// The host index commands fail actionably on a never-built index instead of
+	// silently returning zero matches.
+	preHost := cliHost{backend: backend, plugin: ref.Name, instance: "work"}
+	if _, err := preHost.CallHost(sdkhost.IndexLookupCommand, pluginbinding.DatasourceLookupInput{Text: "open item B", Entity: "test.item"}); err == nil || !strings.Contains(err.Error(), "index build test") {
+		t.Fatalf("expected no-index host lookup error, got %v", err)
+	}
 	indexBuilt, err := backend.BuildIndex(context.Background(), management.IndexBuildRequest{Ref: ref, Instance: "work", Index: "test.items"})
 	if err != nil {
 		t.Fatalf("BuildIndex: %v", err)
@@ -578,6 +593,9 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	}
 	if indexedLookupResult.Count != 1 || indexedLookupResult.Matches[0].ID != "B" || indexedLookupResult.Matches[0].Source.Source != "host_index" {
 		t.Fatalf("indexed lookup = %#v", indexedLookupResult)
+	}
+	if indexedLookup.Hint != "" {
+		t.Fatalf("indexed lookup should carry no hint, got %q", indexedLookup.Hint)
 	}
 	indexedGet, err := backend.CallDatasource(context.Background(), management.DatasourceCallRequest{Ref: ref, Instance: "work", Capability: "get", Input: []byte(`{"datasource":"test.items","entity":"test.item","id":"B"}`)})
 	if err != nil {
@@ -845,6 +863,14 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 		Records []pluginbinding.DatasourceRecord `json:"records"`
 		Count   int                              `json:"count"`
 	}
+	type lookupInput struct {
+		Text   string `json:"text,omitempty"`
+		Entity string `json:"entity,omitempty"`
+	}
+	type lookupOutput struct {
+		Matches []pluginbinding.DatasourceRecord `json:"matches"`
+		Count   int                              `json:"count"`
+	}
 	datasourceSpec := pluginbinding.TypedDatasourceSpec[searchInput, searchOutput](
 		"test.items",
 		"test.item",
@@ -864,6 +890,7 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 			}},
 		}},
 		Datasources: []sdkmanifest.DatasourceSpec{datasourceSpec},
+		Indexes:     []sdkmanifest.IndexSpec{pluginbinding.Index("test.items", "Test items.", "test.item")},
 		Context:     []sdkmanifest.ContextSpec{contextSpec},
 		Endpoints: []sdkmanifest.EndpointSpec{{
 			Name:     "test.endpoint",
@@ -907,6 +934,10 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 				records = append(records, pluginbinding.NewDatasourceRecord(ctx.DatasourceSource(), "test.item", string(rune('A'+i))))
 			}
 			return listOutput{Records: records, Count: len(records)}, nil
+		}),
+		pluginbinding.RegisterDatasourceLookup(datasourceSpec, func(ctx pluginbinding.Context, input lookupInput) (lookupOutput, error) {
+			// Like a real plugin probing its live API: empty matches, no error.
+			return lookupOutput{}, nil
 		}),
 		pluginbinding.RegisterDatasourceBatchGet(datasourceSpec, func(ctx pluginbinding.Context, input batchGetInput) (batchGetOutput, error) {
 			records := make([]pluginbinding.DatasourceRecord, 0, len(input.IDs))

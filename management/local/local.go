@@ -1223,14 +1223,25 @@ func (b *Backend) CallDatasource(ctx context.Context, req management.DatasourceC
 		return management.DatasourceCallResult{}, err
 	}
 	instance := normalizeInstance(req.Instance)
-	if result, handled, err := b.callIndexedDatasource(plugin, instance, command, req.Input); err != nil || handled {
+	snapshots, err := b.loadIndexSnapshots(plugin.Ref, instance)
+	if err != nil {
+		return management.DatasourceCallResult{}, err
+	}
+	if result, handled, err := b.callIndexedDatasource(snapshots, command, req.Input); err != nil || handled {
 		return management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: result}, err
 	}
 	resp, err := b.invokePlugin(ctx, plugin, instance, command, copyRaw(req.Input))
 	if err != nil {
 		return management.DatasourceCallResult{}, err
 	}
-	return management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: copyRaw(resp.Result)}, nil
+	result := management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: copyRaw(resp.Result)}
+	// A lookup/search that fell through to the plugin while the plugin
+	// declares indexes that were never built is a recognizable agent trap:
+	// matches may be silently empty. Surface the remedy alongside the result.
+	if len(snapshots) == 0 && (command == protocol.CommandDatasourcesLookup || command == protocol.CommandDatasourcesSearch) && b.pluginDeclaresIndexes(ctx, plugin, instance) {
+		result.Hint = fmt.Sprintf("index not built — run: fluxplane-plugin index build %s", plugin.Ref.Name)
+	}
+	return result, nil
 }
 
 // ListContextProviders returns context providers advertised by the plugin manifest.

@@ -2,6 +2,34 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.7.0
+
+Agent-usability pass driven by friction hit in real sessions:
+
+### Added
+- **`operation describe` summarizes the output schema.** New `output_fields`
+  (top-level fields plus one nesting level, including array element fields) and
+  `pagination_fields` (truncation signals present among
+  `has_more`/`next_page_token`/`truncated`, plus `total` when accompanying
+  them) in both text and `--json` forms. `output_keys`/`output_schema` remain.
+- **`datasource lookup`/`search` results carry a `hint`** when the call fell
+  through to the plugin while the plugin declares indexes that were never
+  built (`index not built — run: fluxplane-plugin index build <plugin>`).
+  `lookup-all`/`search-all` surface the hint per plugin.
+
+### Changed
+- **`--arg` values coerce to the operation schema's declared type.**
+  `--arg page_id=33729` on a declared-string field now stays the string
+  `"33729"` instead of JSON-parsing to a number and failing schema decode.
+  Explicit JSON quoting (`--arg page_id='"33729"'`) still unquotes once;
+  ambiguous unions, undeclared fields, and unavailable schemas keep the old
+  JSON-when-valid heuristic. Coercion also applies under `--no-validate`.
+- **Host index lookup/search/get on a never-built index fail actionably**
+  (`no index built for plugin … — run: fluxplane-plugin index build <plugin>`)
+  instead of silently returning zero matches, so a plugin resolving a ref like
+  `#general` reports the real cause. A built-but-empty index still returns
+  empty results.
+
 ## v0.6.0
 
 Agent-efficiency pass (10 improvements):

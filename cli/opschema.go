@@ -29,9 +29,11 @@ type operationInputSchema struct {
 }
 
 type operationInputField struct {
-	Type        any    `json:"type"`
-	Description string `json:"description"`
-	Enum        []any  `json:"enum"`
+	Type        any                            `json:"type"`
+	Description string                         `json:"description"`
+	Enum        []any                          `json:"enum"`
+	Properties  map[string]operationInputField `json:"properties"`
+	Items       *operationInputField           `json:"items"`
 }
 
 // operationFieldSummary is the agent-facing per-field view used by describe.
@@ -123,6 +125,104 @@ func summarizeOperationInput(schema operationInputSchema) []operationFieldSummar
 	return out
 }
 
+// operationOutputFieldSummary is the agent-facing per-field view of an
+// operation's output schema: top-level fields plus exactly one nesting level
+// (object children, or the element fields of an array of objects).
+type operationOutputFieldSummary struct {
+	Name        string                        `json:"name"`
+	Type        string                        `json:"type"`
+	Items       string                        `json:"items,omitempty"`
+	Description string                        `json:"description,omitempty"`
+	Fields      []operationOutputFieldSummary `json:"fields,omitempty"`
+}
+
+// summarizeOperationOutput parses an output JSON Schema into a compact field
+// summary plus the truncation/pagination signal fields present (has_more,
+// next_page_token, truncated — with total included only alongside one of
+// those, since a bare total is usually just a count).
+func summarizeOperationOutput(raw json.RawMessage) ([]operationOutputFieldSummary, []string) {
+	if t := strings.TrimSpace(string(raw)); t == "" || t == "null" {
+		return nil, nil
+	}
+	var wire struct {
+		Properties map[string]operationInputField `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil || len(wire.Properties) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(wire.Properties))
+	for name := range wire.Properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]operationOutputFieldSummary, 0, len(names))
+	for _, name := range names {
+		field := wire.Properties[name]
+		summary := operationOutputFieldSummary{
+			Name:        name,
+			Type:        outputFieldType(field),
+			Description: strings.TrimSpace(field.Description),
+		}
+		switch {
+		case summary.Type == "object" && len(field.Properties) > 0:
+			summary.Fields = childFieldSummaries(field.Properties)
+		case summary.Type == "array" && field.Items != nil:
+			summary.Items = outputFieldType(*field.Items)
+			if len(field.Items.Properties) > 0 {
+				summary.Fields = childFieldSummaries(field.Items.Properties)
+			}
+		}
+		out = append(out, summary)
+	}
+	var pagination []string
+	for _, name := range []string{"has_more", "next_page_token", "truncated"} {
+		if _, ok := wire.Properties[name]; ok {
+			pagination = append(pagination, name)
+		}
+	}
+	if len(pagination) > 0 {
+		if _, ok := wire.Properties["total"]; ok {
+			pagination = append(pagination, "total")
+		}
+	}
+	return out, pagination
+}
+
+// childFieldSummaries renders exactly one nesting level — name, type, and
+// description, never recursing into grandchildren.
+func childFieldSummaries(props map[string]operationInputField) []operationOutputFieldSummary {
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]operationOutputFieldSummary, 0, len(names))
+	for _, name := range names {
+		field := props[name]
+		child := operationOutputFieldSummary{Name: name, Type: outputFieldType(field), Description: strings.TrimSpace(field.Description)}
+		if child.Type == "array" && field.Items != nil {
+			child.Items = outputFieldType(*field.Items)
+		}
+		out = append(out, child)
+	}
+	return out
+}
+
+// outputFieldType is schemaFieldType with structural inference: a typeless
+// node that declares properties/items still reads as object/array instead of
+// defaulting to string.
+func outputFieldType(field operationInputField) string {
+	if field.Type == nil {
+		if len(field.Properties) > 0 {
+			return "object"
+		}
+		if field.Items != nil {
+			return "array"
+		}
+	}
+	return schemaFieldType(field)
+}
+
 func operationExample(plugin, operation string, schema operationInputSchema) string {
 	return fmt.Sprintf("fluxplane-plugin operation invoke %s %s --input '%s'", plugin, operation, sampleInputJSON(schema))
 }
@@ -188,4 +288,27 @@ func schemaFieldType(spec operationInputField) string {
 		}
 	}
 	return "string"
+}
+
+// declaredScalarType returns the schema's declared type only when it is
+// unambiguous: the single type string, or the non-null member of a nullable
+// union like ["string","null"]. Ambiguous unions (["string","integer"]) and
+// absent/anyOf declarations return "" — unlike schemaFieldType it never
+// defaults to "string", so callers can fall back to heuristics safely.
+func declaredScalarType(spec operationInputField) string {
+	switch value := spec.Type.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []any:
+		var nonNull []string
+		for _, item := range value {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "null" {
+				nonNull = append(nonNull, strings.TrimSpace(text))
+			}
+		}
+		if len(nonNull) == 1 {
+			return nonNull[0]
+		}
+	}
+	return ""
 }

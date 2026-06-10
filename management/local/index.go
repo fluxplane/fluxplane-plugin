@@ -134,11 +134,7 @@ func (b *Backend) IndexStatus(_ context.Context, req management.IndexStatusReque
 	return out, nil
 }
 
-func (b *Backend) callIndexedDatasource(plugin storedPlugin, instance, command string, input json.RawMessage) (json.RawMessage, bool, error) {
-	snapshots, err := b.loadIndexSnapshots(plugin.Ref, instance)
-	if err != nil {
-		return nil, false, err
-	}
+func (b *Backend) callIndexedDatasource(snapshots []indexSnapshot, command string, input json.RawMessage) (json.RawMessage, bool, error) {
 	if !hasIndexRecords(snapshots) {
 		return nil, false, nil
 	}
@@ -219,6 +215,15 @@ func (b *Backend) callIndexedDatasource(plugin storedPlugin, instance, command s
 	}
 }
 
+// errNoIndexBuilt distinguishes "the index was never built" (no snapshot files
+// at all) from "no match": without it, a plugin resolving a ref like #general
+// reports an opaque not-found and the agent cannot tell the index is missing.
+// A built-but-empty index still yields a snapshot file and keeps returning
+// empty matches.
+func errNoIndexBuilt(plugin string) error {
+	return fmt.Errorf("fluxplane-plugin: no index built for plugin %q — run: fluxplane-plugin index build %s", plugin, plugin)
+}
+
 func (h cliHost) indexLookup(payload any) (json.RawMessage, error) {
 	var input sdkdatasource.LookupInput
 	if err := decodeHostPayload(payload, &input); err != nil {
@@ -227,6 +232,9 @@ func (h cliHost) indexLookup(payload any) (json.RawMessage, error) {
 	snapshots, err := h.backend.loadIndexSnapshots(management.Ref{Name: h.plugin}, normalizeInstance(h.instance))
 	if err != nil {
 		return nil, err
+	}
+	if len(snapshots) == 0 {
+		return nil, errNoIndexBuilt(h.plugin)
 	}
 	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
 	if !handled {
@@ -246,6 +254,9 @@ func (h cliHost) indexSearch(payload any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(snapshots) == 0 {
+		return nil, errNoIndexBuilt(h.plugin)
+	}
 	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
 	if !handled {
 		selected = nil
@@ -264,6 +275,9 @@ func (h cliHost) indexGet(payload any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(snapshots) == 0 {
+		return nil, errNoIndexBuilt(h.plugin)
+	}
 	selected, handled := selectedIndexSnapshots(snapshots, input.Datasource, input.Entity)
 	if !handled {
 		selected = nil
@@ -274,6 +288,17 @@ func (h cliHost) indexGet(payload any) (json.RawMessage, error) {
 	}
 	result := sdkdatasource.NewGetResult("host_index", record)
 	return json.Marshal(result)
+}
+
+// pluginDeclaresIndexes reports whether the plugin's manifest declares index
+// specs. Best-effort: errors read as "no indexes". Only called on the rare
+// no-snapshot lookup/search path, so the potential manifest fetch is cheap.
+func (b *Backend) pluginDeclaresIndexes(ctx context.Context, plugin storedPlugin, instance string) bool {
+	manifest, err := b.manifestForPlugin(ctx, plugin, instance)
+	if err != nil {
+		return false
+	}
+	return len(manifest.Indexes) > 0
 }
 
 func (b *Backend) decodeIndexBuildResults(ctx context.Context, plugin storedPlugin, instance string, raw json.RawMessage) ([]indexSnapshot, error) {

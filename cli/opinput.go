@@ -11,12 +11,15 @@ import (
 // buildInvokeInput assembles an operation's input from three sources, in order:
 //   - a base object from --input (or "-" to read stdin) / --input-file
 //   - --arg key=value overrides, where a dotted key (a.b.c) sets a nested field
-//     and the value is parsed as JSON when valid (numbers, bools, arrays,
-//     objects, quoted strings) else treated as a plain string
+//     and the value is coerced to the operation schema's declared type when one
+//     is known (declared-string fields keep the raw text), else parsed as JSON
+//     when valid (numbers, bools, arrays, objects, quoted strings), else
+//     treated as a plain string
 //
 // With no --arg, the base payload is returned untouched (so non-object inputs
 // like arrays still work). With --arg present, the base must be a JSON object.
-func buildInvokeInput(input, inputFile string, args []string, stdin io.Reader) (json.RawMessage, error) {
+// schema may be nil when the operation's input schema is unavailable.
+func buildInvokeInput(input, inputFile string, args []string, stdin io.Reader, schema *operationInputSchema) (json.RawMessage, error) {
 	var base json.RawMessage
 	if strings.TrimSpace(input) == "-" {
 		data, err := io.ReadAll(stdin)
@@ -54,9 +57,54 @@ func buildInvokeInput(input, inputFile string, args []string, stdin io.Reader) (
 		if key == "" {
 			return nil, fmt.Errorf("fluxplane-plugin: --arg %q has an empty key", arg)
 		}
-		setNestedValue(obj, strings.Split(key, "."), parseArgValue(raw))
+		path := strings.Split(key, ".")
+		setNestedValue(obj, path, coerceArgValue(raw, schema, path))
 	}
 	return json.Marshal(obj)
+}
+
+// coerceArgValue interprets a --arg value according to the operation schema's
+// declared type for the (dotted) target path. Declared-string fields keep the
+// raw text — `--arg page_id=33729` stays the string "33729" — with explicit
+// JSON quoting as the escape hatch. Everything else (numbers, booleans,
+// arrays, objects, ambiguous unions, unknown fields, nil schema) falls back to
+// the parseArgValue heuristic, which already matches those declared types.
+func coerceArgValue(raw string, schema *operationInputSchema, path []string) any {
+	field, ok := fieldForPath(schema, path)
+	if !ok {
+		return parseArgValue(raw)
+	}
+	if declaredScalarType(field) == "string" {
+		if trimmed := strings.TrimSpace(raw); strings.HasPrefix(trimmed, `"`) {
+			var s string
+			if json.Unmarshal([]byte(trimmed), &s) == nil {
+				return s
+			}
+		}
+		return raw
+	}
+	return parseArgValue(raw)
+}
+
+// fieldForPath walks the schema's nested object properties along a dotted-key
+// path; false when the schema is nil or any segment is undeclared.
+func fieldForPath(schema *operationInputSchema, path []string) (operationInputField, bool) {
+	if schema == nil || len(path) == 0 {
+		return operationInputField{}, false
+	}
+	props := schema.Properties
+	var field operationInputField
+	for i, key := range path {
+		spec, ok := props[key]
+		if !ok {
+			return operationInputField{}, false
+		}
+		field = spec
+		if i < len(path)-1 {
+			props = spec.Properties
+		}
+	}
+	return field, true
 }
 
 // parseArgValue interprets a --arg value as JSON when it parses cleanly, so
