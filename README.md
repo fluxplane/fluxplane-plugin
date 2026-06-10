@@ -37,7 +37,10 @@ primitives, never app-specific providers:
   the Docker SDK, an Asterisk AMI client). The protocol/wire logic lives in the
   plugin; only the socket crosses the host boundary, where it can be audited and
   policy-gated.
-- `process.run` / `process.start` / `process.stop` — child processes.
+- `process.run` / `process.start` / `process.stop` / `process.list` — child
+  processes. Long-lived background processes (e.g. port-forwards) persist as
+  records and are also visible from the CLI via `fluxplane-plugin process
+  list|logs|stop`.
 - `blob.read` / `blob.write` / `blob.info`, `env.lookup`, `secret`, `endpoint`.
 
 The framed host channel multiplexes responses by request id, so a plugin may
@@ -48,6 +51,28 @@ Endpoints resolve from durable state (auth-wired or registered), never from the
 environment at call time, so where a request is sent is deterministic. When an
 operation omits `endpoint_ref`, the local backend injects the instance's wired
 endpoint, or the single registered endpoint for the plugin's product.
+
+## Shell completion
+
+The CLI ships cobra's completion command with dynamic plugin, operation, and
+process-ID arguments (served from local state and the operations cache, never
+by spawning plugins). For fish:
+
+```fish
+fluxplane-plugin completion fish > ~/.config/fish/completions/fluxplane-plugin.fish
+```
+
+(bash: `source <(fluxplane-plugin completion bash)`; zsh: see
+`fluxplane-plugin completion zsh --help`.)
+
+## Version pinning and rollback
+
+`fluxplane-plugin pin jira@v0.3.2` reinstalls that exact version and holds it —
+`upgrade` and `install --all` skip pinned plugins (reported as
+`"skipped": true, "reason": "pinned to v0.3.2"`). `unpin jira` releases the
+hold, `rollback jira` swaps back to the previously installed version (rolling
+back twice round-trips). Note `dev sync` intentionally still rebuilds pinned
+plugins from the workspace — the dev loop trumps the pin.
 
 ## Target direction
 

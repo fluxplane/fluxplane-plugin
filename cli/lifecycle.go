@@ -21,6 +21,8 @@ type batchInstallResult struct {
 	Installed bool           `json:"installed,omitempty"`
 	Updated   bool           `json:"updated,omitempty"`
 	Skipped   bool           `json:"skipped,omitempty"`
+	Reason    string         `json:"reason,omitempty"`
+	Version   string         `json:"version,omitempty"`
 	Error     string         `json:"error,omitempty"`
 }
 
@@ -33,12 +35,21 @@ type upgradeResult struct {
 
 // installAllPlugins (re)installs every marketplace plugin. With remote=true it
 // forces the published go_install source over any local_path (used by upgrade);
-// otherwise it builds from local_path when available (dev sync). Per-plugin
-// failures are collected, never aborting the batch.
+// otherwise it builds from local_path when available (dev sync). Pinned
+// plugins are skipped with the pin as the reason. Per-plugin failures are
+// collected, never aborting the batch.
 func installAllPlugins(ctx context.Context, backend management.Backend, remote, dryRun bool) []batchInstallResult {
 	catalog, err := backend.SearchPlugins(ctx, management.SearchRequest{})
 	if err != nil {
 		return []batchInstallResult{{Error: err.Error()}}
+	}
+	pinned := map[string]string{}
+	if installed, err := backend.ListPlugins(ctx, management.ListRequest{All: true}); err == nil {
+		for _, plugin := range installed {
+			if plugin.Pinned != "" {
+				pinned[strings.ToLower(plugin.Ref.Name)] = plugin.Pinned
+			}
+		}
 	}
 	var out []batchInstallResult
 	for _, plugin := range catalog.Plugins {
@@ -52,6 +63,10 @@ func installAllPlugins(ctx context.Context, backend management.Backend, remote, 
 			out = append(out, batchInstallResult{Plugin: plugin.Ref, Skipped: true})
 			continue
 		}
+		if hold, ok := pinned[strings.ToLower(name)]; ok {
+			out = append(out, batchInstallResult{Plugin: plugin.Ref, Skipped: true, Reason: "pinned to " + hold})
+			continue
+		}
 		res := batchInstallResult{Plugin: plugin.Ref}
 		r, err := backend.InstallPlugin(ctx, management.InstallRequest{Ref: plugin.Ref, Force: true, PreferRemote: remote, DryRun: dryRun})
 		if err != nil {
@@ -59,6 +74,7 @@ func installAllPlugins(ctx context.Context, backend management.Backend, remote, 
 		} else {
 			res.Installed = r.Installed
 			res.Updated = r.Updated
+			res.Version = r.Plugin.InstalledVersion
 		}
 		out = append(out, res)
 	}

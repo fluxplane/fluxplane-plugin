@@ -79,7 +79,13 @@ func New(opts Options) *cobra.Command {
 		newDevCommand(opts.Backend),
 		newDoctorCommand(opts.Backend),
 		newSelftestCommand(opts.Backend),
+		newPinCommand(opts.Backend),
+		newUnpinCommand(opts.Backend),
+		newRollbackCommand(opts.Backend),
+		newProcessCommand(opts.Backend),
+		newDescribeCommand(opts.Backend),
 	)
+	wirePluginNameCompletion(cmd, opts.Backend)
 	return cmd
 }
 
@@ -864,6 +870,7 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	var resultOnly bool
 	var fields string
 	var strict bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:     "invoke PLUGIN[@VERSION] OPERATION",
 		Aliases: []string{"run", "call"},
@@ -875,6 +882,11 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 			}
 			ref := parseRef(args[0])
 			opName := args[1]
+			if timeout > 0 {
+				ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+				defer cancel()
+				cmd.SetContext(ctx)
+			}
 
 			// The operation schema is fetched once (the backend caches operation
 			// listings) and serves two purposes: coercing --arg values to their
@@ -948,6 +960,8 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
 	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result (e.g. key,issue.fields.status.name)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero when a --field path is missing")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the invocation after this duration (e.g. 30s); 0 uses the backend default")
+	cmd.ValidArgsFunction = operationNameCompletion(backend)
 	return cmd
 }
 
@@ -983,6 +997,7 @@ func newOperationBatchCommand(backend management.Backend) *cobra.Command {
 	var instance string
 	var input string
 	var inputFile string
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "batch PLUGIN[@VERSION]",
 		Short: "Invoke multiple plugin operations",
@@ -999,16 +1014,23 @@ func newOperationBatchCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if timeout > 0 {
+				ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+				defer cancel()
+				cmd.SetContext(ctx)
+			}
 			result, err := backend.BatchOperations(cmd.Context(), management.OperationBatchRequest{Ref: parseRef(args[0]), Instance: instance, Calls: calls})
 			if err != nil {
 				return err
 			}
 			return printJSON(cmd.OutOrStdout(), result)
 		},
+		ValidArgsFunction: pluginNameCompletion(backend),
 	}
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringVar(&input, "input", "", "operation batch JSON")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation batch JSON file")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the batch after this duration (e.g. 30s); 0 uses the backend default")
 	return cmd
 }
 

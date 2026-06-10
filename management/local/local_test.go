@@ -1083,3 +1083,265 @@ func testRuntimePlugin() *pluginbinding.Plugin {
 	})
 	return plugin
 }
+
+func TestInstallVersionedMarketplacePluginThreadsVersion(t *testing.T) {
+	dir := t.TempDir()
+	var installedSpecs []string
+	origInstall := goInstallBinary
+	goInstallBinary = func(ctx context.Context, binDir, source string) error {
+		installedSpecs = append(installedSpecs, source)
+		if err := os.MkdirAll(binDir, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(binDir, "fluxplane-plugin-clockwork"), []byte("#!/bin/sh\n"), 0o700)
+	}
+	defer func() { goInstallBinary = origInstall }()
+	origInspect := inspectInstalledModuleVersion
+	versionByCall := []string{"v0.2.0", "v0.3.0"}
+	calls := 0
+	inspectInstalledModuleVersion = func(ctx context.Context, path string) string {
+		v := versionByCall[calls%len(versionByCall)]
+		calls++
+		return v
+	}
+	defer func() { inspectInstalledModuleVersion = origInspect }()
+
+	backend, err := New(WithPath(filepath.Join(dir, "plugins.json")), WithMarketplace(sdkmanifest.Marketplace{
+		Version: "1",
+		Plugins: []sdkmanifest.PluginEntry{{
+			Name:      "clockwork",
+			Binary:    "fluxplane-plugin-clockwork",
+			GoInstall: "example.com/clockwork/cmd/fluxplane-plugin-clockwork@latest",
+		}},
+	}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	install, err := backend.InstallPlugin(ctx, management.InstallRequest{Ref: management.Ref{Name: "clockwork", Version: "v0.2.0"}})
+	if err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	if len(installedSpecs) != 1 || installedSpecs[0] != "example.com/clockwork/cmd/fluxplane-plugin-clockwork@v0.2.0" {
+		t.Fatalf("go install specs = %#v, want versioned spec", installedSpecs)
+	}
+	if install.Plugin.Ref.Key() != "clockwork" {
+		t.Fatalf("stored key = %q, want bare name", install.Plugin.Ref.Key())
+	}
+	if install.Plugin.InstalledVersion != "v0.2.0" {
+		t.Fatalf("installed version = %q, want v0.2.0", install.Plugin.InstalledVersion)
+	}
+	// Upgrading to a newer version records the replaced one for rollback.
+	upgraded, err := backend.InstallPlugin(ctx, management.InstallRequest{Ref: management.Ref{Name: "clockwork", Version: "v0.3.0"}, Force: true})
+	if err != nil {
+		t.Fatalf("InstallPlugin force: %v", err)
+	}
+	if upgraded.Plugin.InstalledVersion != "v0.3.0" || upgraded.Plugin.PreviousVersion != "v0.2.0" {
+		t.Fatalf("upgraded versions = %q/%q, want v0.3.0/v0.2.0", upgraded.Plugin.InstalledVersion, upgraded.Plugin.PreviousVersion)
+	}
+	plugins, err := backend.ListPlugins(ctx, management.ListRequest{All: true})
+	if err != nil {
+		t.Fatalf("ListPlugins: %v", err)
+	}
+	if len(plugins) != 1 || plugins[0].Ref.Key() != "clockwork" {
+		t.Fatalf("plugins = %#v, want a single bare-keyed record", plugins)
+	}
+}
+
+func TestReadStateMigratesLegacyVersionedMarketplaceKeys(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "plugins.json")
+	legacy := `{
+  "plugins": {
+    "clockwork@v0.1.0": {
+      "ref": {"name": "clockwork", "version": "v0.1.0"},
+      "source": "marketplace",
+      "installed": true,
+      "enabled": true
+    },
+    "devthing@v9": {
+      "ref": {"name": "devthing", "version": "v9"},
+      "source": "test",
+      "installed": true,
+      "enabled": true
+    }
+  },
+  "instances": {
+    "clockwork@v0.1.0#default": {
+      "plugin": {"name": "clockwork", "version": "v0.1.0"},
+      "name": "default",
+      "enabled": true
+    }
+  }
+}`
+	if err := os.WriteFile(statePath, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	backend, err := New(WithPath(statePath), WithMarketplace(sdkmanifest.Marketplace{Version: "1"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	st, err := backend.readState()
+	if err != nil {
+		t.Fatalf("readState: %v", err)
+	}
+	migrated, ok := st.Plugins["clockwork"]
+	if !ok {
+		t.Fatalf("plugins = %#v, want migrated bare clockwork key", st.Plugins)
+	}
+	if migrated.Ref.Version != "" || migrated.InstalledVersion != "v0.1.0" {
+		t.Fatalf("migrated = ref version %q installed %q, want \"\"/v0.1.0", migrated.Ref.Version, migrated.InstalledVersion)
+	}
+	if _, stale := st.Plugins["clockwork@v0.1.0"]; stale {
+		t.Fatal("legacy versioned key still present after migration")
+	}
+	if _, ok := st.Instances["clockwork#default"]; !ok {
+		t.Fatalf("instances = %#v, want migrated clockwork#default", st.Instances)
+	}
+	// Non-marketplace records keep their versioned identity.
+	if _, ok := st.Plugins["devthing@v9"]; !ok {
+		t.Fatalf("plugins = %#v, want devthing@v9 untouched", st.Plugins)
+	}
+}
+
+func TestPinAndRollbackPlugin(t *testing.T) {
+	dir := t.TempDir()
+	var installedSpecs []string
+	origInstall := goInstallBinary
+	goInstallBinary = func(ctx context.Context, binDir, source string) error {
+		installedSpecs = append(installedSpecs, source)
+		if err := os.MkdirAll(binDir, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(binDir, "fluxplane-plugin-clockwork"), []byte("#!/bin/sh\n"), 0o700)
+	}
+	defer func() { goInstallBinary = origInstall }()
+	origInspect := inspectInstalledModuleVersion
+	nextVersion := "v0.2.0"
+	inspectInstalledModuleVersion = func(ctx context.Context, path string) string { return nextVersion }
+	defer func() { inspectInstalledModuleVersion = origInspect }()
+
+	backend, err := New(WithPath(filepath.Join(dir, "plugins.json")), WithMarketplace(sdkmanifest.Marketplace{
+		Version: "1",
+		Plugins: []sdkmanifest.PluginEntry{{
+			Name:      "clockwork",
+			Binary:    "fluxplane-plugin-clockwork",
+			GoInstall: "example.com/clockwork/cmd/fluxplane-plugin-clockwork@latest",
+		}},
+	}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := backend.InstallPlugin(ctx, management.InstallRequest{Ref: management.Ref{Name: "clockwork"}}); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	nextVersion = "v0.3.0"
+	if _, err := backend.InstallPlugin(ctx, management.InstallRequest{Ref: management.Ref{Name: "clockwork"}, Force: true}); err != nil {
+		t.Fatalf("InstallPlugin upgrade: %v", err)
+	}
+
+	// Rollback refuses while pinned.
+	pin, err := backend.PinPlugin(ctx, management.PinRequest{Ref: management.Ref{Name: "clockwork"}})
+	if err != nil {
+		t.Fatalf("PinPlugin: %v", err)
+	}
+	if pin.Pinned != "v0.3.0" || !pin.Changed {
+		t.Fatalf("pin = %#v, want pinned at installed v0.3.0", pin)
+	}
+	if _, err := backend.RollbackPlugin(ctx, management.RollbackRequest{Ref: management.Ref{Name: "clockwork"}}); err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("rollback while pinned err = %v, want pinned refusal", err)
+	}
+	unpin, err := backend.PinPlugin(ctx, management.PinRequest{Ref: management.Ref{Name: "clockwork"}, Unpin: true})
+	if err != nil || unpin.Pinned != "" || !unpin.Changed {
+		t.Fatalf("unpin = %#v err = %v", unpin, err)
+	}
+
+	// Rollback swaps to the previous version and records the replaced one.
+	nextVersion = "v0.2.0"
+	rolled, err := backend.RollbackPlugin(ctx, management.RollbackRequest{Ref: management.Ref{Name: "clockwork"}})
+	if err != nil {
+		t.Fatalf("RollbackPlugin: %v", err)
+	}
+	if !rolled.RolledBack || rolled.From != "v0.3.0" || rolled.To != "v0.2.0" {
+		t.Fatalf("rolled = %#v", rolled)
+	}
+	if got := installedSpecs[len(installedSpecs)-1]; got != "example.com/clockwork/cmd/fluxplane-plugin-clockwork@v0.2.0" {
+		t.Fatalf("rollback installed %q, want @v0.2.0", got)
+	}
+	// Rolling back twice round-trips.
+	nextVersion = "v0.3.0"
+	again, err := backend.RollbackPlugin(ctx, management.RollbackRequest{Ref: management.Ref{Name: "clockwork"}})
+	if err != nil || again.From != "v0.2.0" || again.To != "v0.3.0" {
+		t.Fatalf("second rollback = %#v err = %v", again, err)
+	}
+}
+
+func TestRollbackWithoutPreviousVersionFails(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir()+"/plugins.json"), WithMarketplace(sdkmanifest.Marketplace{Version: "1"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := backend.InstallPlugin(ctx, management.InstallRequest{
+		Ref:     management.Ref{Name: "adhoc"},
+		Source:  "test",
+		Runtime: management.RuntimeSpec{Kind: "stdio", Command: "adhoc"},
+	}); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	if _, err := backend.RollbackPlugin(ctx, management.RollbackRequest{Ref: management.Ref{Name: "adhoc"}}); err == nil || !strings.Contains(err.Error(), "no previous version") {
+		t.Fatalf("err = %v, want no-previous-version error", err)
+	}
+}
+
+func TestBackendListProcessesFiltersByPlugin(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	host := cliHost{backend: backend, plugin: "kubernetes", instance: "default"}
+	startRaw, err := host.CallHost(protocol.HostCapabilityProcessStart, sdkhost.ProcessStartRequest{
+		Command: "sleep",
+		Args:    []string{"30"},
+		Group:   "kubernetes.portforward",
+	})
+	if err != nil {
+		t.Fatalf("process start: %v", err)
+	}
+	var started sdkhost.ProcessStartResponse
+	if err := json.Unmarshal(startRaw, &started); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	defer func() {
+		_, _ = backend.StopProcess(context.Background(), sdkhost.ProcessStopRequest{ID: started.ID, Signal: "SIGKILL"})
+	}()
+
+	list, err := backend.ListProcesses(context.Background(), sdkhost.ProcessListRequest{Plugin: "kubernetes"})
+	if err != nil {
+		t.Fatalf("ListProcesses: %v", err)
+	}
+	if list.Count != 1 || list.Processes[0].Plugin != "kubernetes" || list.Processes[0].Instance != "default" || !list.Processes[0].Alive {
+		t.Fatalf("list = %#v, want one alive kubernetes-owned process", list)
+	}
+	other, err := backend.ListProcesses(context.Background(), sdkhost.ProcessListRequest{Plugin: "asterisk"})
+	if err != nil {
+		t.Fatalf("ListProcesses other: %v", err)
+	}
+	if other.Count != 0 {
+		t.Fatalf("other = %#v, want empty", other)
+	}
+	stopped, err := backend.StopProcess(context.Background(), sdkhost.ProcessStopRequest{ID: started.ID, Signal: "SIGTERM"})
+	if err != nil || !stopped.Stopped {
+		t.Fatalf("StopProcess = %#v err = %v", stopped, err)
+	}
+	after, err := backend.ListProcesses(context.Background(), sdkhost.ProcessListRequest{})
+	if err != nil {
+		t.Fatalf("ListProcesses after stop: %v", err)
+	}
+	for _, record := range after.Processes {
+		if record.ID == started.ID {
+			t.Fatalf("stopped process still listed: %#v", record)
+		}
+	}
+}

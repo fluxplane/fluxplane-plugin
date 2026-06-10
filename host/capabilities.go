@@ -164,21 +164,25 @@ type ProcessStopResponse struct {
 }
 
 // ProcessListRequest filters the host's started-process records. Empty fields
-// match everything; Group/Label match exactly.
+// match everything; Group/Label/Plugin match exactly.
 type ProcessListRequest struct {
-	Group string `json:"group,omitempty"`
-	Label string `json:"label,omitempty"`
+	Group  string `json:"group,omitempty"`
+	Label  string `json:"label,omitempty"`
+	Plugin string `json:"plugin,omitempty"`
 }
 
 // ProcessRecord is one host-managed background process started via
 // ProcessStart. Alive reports whether the PID still exists at list time, so a
-// caller can tell a running forward/tunnel from a dead record.
+// caller can tell a running forward/tunnel from a dead record. Plugin/Instance
+// record which plugin started the process.
 type ProcessRecord struct {
 	ID        string            `json:"id"`
 	Command   string            `json:"command"`
 	Args      []string          `json:"args,omitempty"`
 	Workdir   string            `json:"workdir,omitempty"`
 	PID       int               `json:"pid,omitempty"`
+	Plugin    string            `json:"plugin,omitempty"`
+	Instance  string            `json:"instance,omitempty"`
 	Group     string            `json:"group,omitempty"`
 	Label     string            `json:"label,omitempty"`
 	Tags      []string          `json:"tags,omitempty"`

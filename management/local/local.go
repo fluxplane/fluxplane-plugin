@@ -315,7 +315,15 @@ func (b *Backend) InstallPlugin(ctx context.Context, req management.InstallReque
 	if err != nil {
 		return management.InstallResult{}, err
 	}
-	key := req.Ref.Key()
+	// Marketplace installs are stored under the bare plugin name: the
+	// requested version selects what to install (threaded into go_install)
+	// and is recorded as InstalledVersion, never as part of the state key.
+	// Explicit/dev installs keep their full Ref.Key() identity.
+	storedRef := req.Ref
+	if resolved && !explicitInstall(req) {
+		storedRef = management.Ref{Name: req.Ref.Name, Channel: req.Ref.Channel}
+	}
+	key := storedRef.Key()
 	existing, exists := st.Plugins[key]
 	if exists && !req.Force && !req.DryRun {
 		return management.InstallResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is already installed", key)
@@ -326,30 +334,33 @@ func (b *Backend) InstallPlugin(ctx context.Context, req management.InstallReque
 		labels = mergeLabels(marketplaceLabels(entry), labels)
 	}
 	runtime := req.Runtime
+	installedVersion := ""
 	if isEmptyRuntime(runtime) && resolved {
 		if req.DryRun {
 			runtime = marketplaceRuntime(entry)
 		} else {
-			preparedRuntime, preparedLabels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, req.PreferRemote)
+			preparedRuntime, preparedLabels, preparedVersion, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, req.PreferRemote)
 			if err != nil {
 				return management.InstallResult{}, err
 			}
 			runtime = preparedRuntime
 			labels = mergeLabels(labels, preparedLabels)
+			installedVersion = preparedVersion
 		}
 	}
 	plugin := storedPlugin{
 		Plugin: management.Plugin{
-			Ref:         req.Ref,
-			Source:      req.Source,
-			Description: marketplaceDescription(entry),
-			Installed:   true,
-			Enabled:     true,
-			Runtime:     runtime,
-			ManifestRef: firstNonEmpty(req.ManifestRef, entry.GoInstall),
-			Labels:      labels,
-			InstalledAt: now,
-			UpdatedAt:   now,
+			Ref:              storedRef,
+			Source:           req.Source,
+			Description:      marketplaceDescription(entry),
+			Installed:        true,
+			Enabled:          true,
+			Runtime:          runtime,
+			ManifestRef:      firstNonEmpty(req.ManifestRef, entry.GoInstall),
+			Labels:           labels,
+			InstalledAt:      now,
+			UpdatedAt:        now,
+			InstalledVersion: installedVersion,
 		},
 		Config:   req.Config,
 		Manifest: copyRaw(req.Manifest),
@@ -376,6 +387,14 @@ func (b *Backend) InstallPlugin(ctx context.Context, req management.InstallReque
 		}
 		if len(plugin.Labels) == 0 {
 			plugin.Labels = existing.Labels
+		}
+		plugin.Pinned = existing.Pinned
+		plugin.PreviousVersion = existing.PreviousVersion
+		switch {
+		case plugin.InstalledVersion == "":
+			plugin.InstalledVersion = existing.InstalledVersion
+		case existing.InstalledVersion != "" && existing.InstalledVersion != plugin.InstalledVersion:
+			plugin.PreviousVersion = existing.InstalledVersion
 		}
 	}
 	if req.DryRun {
@@ -420,12 +439,18 @@ func (b *Backend) UpdatePlugin(ctx context.Context, req management.UpdateRequest
 			plugin.Runtime = marketplaceRuntime(entry)
 		} else {
 			oldPlugin := plugin
-			runtime, labels, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, false)
+			runtime, labels, version, err := b.prepareMarketplaceRuntime(ctx, req.Ref, entry, false)
 			if err != nil {
 				return management.UpdateResult{}, err
 			}
 			plugin.Runtime = runtime
 			plugin.Labels = mergeLabels(mergeLabels(marketplaceLabels(entry), plugin.Labels), labels)
+			if version != "" {
+				if plugin.InstalledVersion != "" && plugin.InstalledVersion != version {
+					plugin.PreviousVersion = plugin.InstalledVersion
+				}
+				plugin.InstalledVersion = version
+			}
 			// Only remove the previous artifact when the rebuild produced a
 			// different path; the marketplace binary path is deterministic, so
 			// removing it after a same-path rebuild would delete the new binary.
@@ -453,6 +478,116 @@ func (b *Backend) UpdatePlugin(ctx context.Context, req management.UpdateRequest
 		return management.UpdateResult{}, err
 	}
 	return management.UpdateResult{Plugin: plugin.Plugin, Updated: true}, nil
+}
+
+// lookupStoredPlugin finds an installed plugin by its full ref key or, when
+// that misses, by bare name (marketplace installs are stored bare).
+func lookupStoredPlugin(st state, ref management.Ref) (string, storedPlugin, bool) {
+	if plugin, ok := st.Plugins[ref.Key()]; ok {
+		return ref.Key(), plugin, true
+	}
+	if plugin, ok := st.Plugins[ref.Name]; ok {
+		return ref.Name, plugin, true
+	}
+	return "", storedPlugin{}, false
+}
+
+// PinPlugin holds an installed plugin at a version so upgrade and
+// install --all skip it. The version comes from req.Ref.Version, defaulting to
+// the currently installed version. Pinning only records the hold; reinstalling
+// at a different version is composed by the CLI.
+func (b *Backend) PinPlugin(ctx context.Context, req management.PinRequest) (management.PinResult, error) {
+	if err := validateRef(req.Ref); err != nil {
+		return management.PinResult{}, err
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.PinResult{}, err
+	}
+	key, plugin, ok := lookupStoredPlugin(st, req.Ref)
+	if !ok {
+		return management.PinResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is not installed", req.Ref.Name)
+	}
+	pinned := ""
+	if !req.Unpin {
+		pinned = strings.TrimSpace(req.Ref.Version)
+		if pinned == "" {
+			pinned = plugin.InstalledVersion
+		}
+		if pinned == "" {
+			return management.PinResult{}, fmt.Errorf("fluxplane-plugin: plugin %q has no recorded installed version; pin an explicit version with %s@<version>", req.Ref.Name, req.Ref.Name)
+		}
+	}
+	changed := plugin.Pinned != pinned
+	plugin.Pinned = pinned
+	if req.DryRun || !changed {
+		return management.PinResult{Plugin: plugin.Plugin, Pinned: pinned, Changed: changed}, nil
+	}
+	plugin.UpdatedAt = time.Now().UTC()
+	st.Plugins[key] = plugin
+	if err := b.writeState(st); err != nil {
+		return management.PinResult{}, err
+	}
+	return management.PinResult{Plugin: plugin.Plugin, Pinned: pinned, Changed: true}, nil
+}
+
+// RollbackPlugin reinstalls the previously installed version of a marketplace
+// plugin and swaps the version bookkeeping, so rolling back twice round-trips.
+func (b *Backend) RollbackPlugin(ctx context.Context, req management.RollbackRequest) (management.RollbackResult, error) {
+	if err := validateRef(req.Ref); err != nil {
+		return management.RollbackResult{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	st, err := b.readState()
+	if err != nil {
+		return management.RollbackResult{}, err
+	}
+	key, plugin, ok := lookupStoredPlugin(st, req.Ref)
+	if !ok {
+		return management.RollbackResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is not installed", req.Ref.Name)
+	}
+	if plugin.Pinned != "" {
+		return management.RollbackResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is pinned to %s; run `fluxplane-plugin unpin %s` first or pin the target version directly", req.Ref.Name, plugin.Pinned, req.Ref.Name)
+	}
+	previous := strings.TrimSpace(plugin.PreviousVersion)
+	if previous == "" {
+		return management.RollbackResult{}, fmt.Errorf("fluxplane-plugin: plugin %q has no previous version recorded; install an explicit version with `fluxplane-plugin install %s@<version> --force`", req.Ref.Name, req.Ref.Name)
+	}
+	from := plugin.InstalledVersion
+	if req.DryRun {
+		return management.RollbackResult{Plugin: plugin.Plugin, RolledBack: false, From: from, To: previous}, nil
+	}
+	entry, resolved := b.resolveMarketplace(management.Ref{Name: plugin.Ref.Name})
+	if !resolved {
+		return management.RollbackResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is not in the marketplace; cannot roll back", req.Ref.Name)
+	}
+	oldPlugin := plugin
+	runtime, labels, version, err := b.prepareMarketplaceRuntime(ctx, management.Ref{Name: plugin.Ref.Name, Version: previous}, entry, true)
+	if err != nil {
+		return management.RollbackResult{}, err
+	}
+	plugin.Runtime = runtime
+	plugin.Labels = mergeLabels(mergeLabels(marketplaceLabels(entry), plugin.Labels), labels)
+	oldPath := strings.TrimSpace(oldPlugin.Labels["installed_binary_path"])
+	newPath := strings.TrimSpace(plugin.Labels["installed_binary_path"])
+	if oldPath != "" && oldPath != newPath {
+		if err := b.removeOwnedArtifact(oldPlugin); err != nil {
+			return management.RollbackResult{}, err
+		}
+	}
+	if version == "" {
+		version = previous
+	}
+	plugin.PreviousVersion = from
+	plugin.InstalledVersion = version
+	plugin.UpdatedAt = time.Now().UTC()
+	st.Plugins[key] = plugin
+	if err := b.writeState(st); err != nil {
+		return management.RollbackResult{}, err
+	}
+	return management.RollbackResult{Plugin: plugin.Plugin, RolledBack: true, From: from, To: version}, nil
 }
 
 // SyncLocalPlugins rebuilds installed plugins from their recorded workspace
@@ -2027,12 +2162,23 @@ func (h cliHost) processList(payload any) (json.RawMessage, error) {
 	if h.backend == nil {
 		return nil, fmt.Errorf("process store is unavailable")
 	}
-	st, err := h.backend.readState()
+	resp, err := h.backend.ListProcesses(context.Background(), req)
 	if err != nil {
 		return nil, err
 	}
+	return json.Marshal(resp)
+}
+
+// ListProcesses reports host-managed background processes (started by plugins
+// via the process capability) with a PID liveness probe per record.
+func (b *Backend) ListProcesses(_ context.Context, req sdkhost.ProcessListRequest) (sdkhost.ProcessListResponse, error) {
+	st, err := b.readState()
+	if err != nil {
+		return sdkhost.ProcessListResponse{}, err
+	}
 	group := strings.TrimSpace(req.Group)
 	label := strings.TrimSpace(req.Label)
+	pluginName := strings.TrimSpace(req.Plugin)
 	resp := sdkhost.ProcessListResponse{Processes: []sdkhost.ProcessRecord{}}
 	for _, record := range st.Processes {
 		if group != "" && record.Group != group {
@@ -2041,12 +2187,17 @@ func (h cliHost) processList(payload any) (json.RawMessage, error) {
 		if label != "" && record.Label != label {
 			continue
 		}
+		if pluginName != "" && !strings.EqualFold(record.Plugin, pluginName) {
+			continue
+		}
 		resp.Processes = append(resp.Processes, sdkhost.ProcessRecord{
 			ID:        record.ID,
 			Command:   record.Command,
 			Args:      append([]string(nil), record.Args...),
 			Workdir:   record.Workdir,
 			PID:       record.PID,
+			Plugin:    record.Plugin,
+			Instance:  record.Instance,
 			Group:     record.Group,
 			Label:     record.Label,
 			Tags:      append([]string(nil), record.Tags...),
@@ -2058,7 +2209,13 @@ func (h cliHost) processList(payload any) (json.RawMessage, error) {
 	}
 	sort.Slice(resp.Processes, func(i, j int) bool { return resp.Processes[i].StartedAt.Before(resp.Processes[j].StartedAt) })
 	resp.Count = len(resp.Processes)
-	return json.Marshal(resp)
+	return resp, nil
+}
+
+// StopProcess signals a host-managed background process (the whole process
+// group when one was recorded) and removes its record on success.
+func (b *Backend) StopProcess(_ context.Context, req sdkhost.ProcessStopRequest) (sdkhost.ProcessStopResponse, error) {
+	return cliHost{backend: b}.stopStoredProcess(req)
 }
 
 // processAlive reports whether a PID currently exists (signal 0 probe).
@@ -2516,7 +2673,48 @@ func (b *Backend) readState() (state, error) {
 	if st.Processes == nil {
 		st.Processes = map[string]storedProcess{}
 	}
+	migrateVersionedKeys(&st)
 	return st, nil
+}
+
+// migrateVersionedKeys merges legacy "name@version" plugin records (created
+// before versioned installs were threaded into go_install) into the bare
+// "name" key, recording the version as InstalledVersion. Only
+// marketplace-sourced records migrate — explicit/dev installs keep their full
+// Ref.Key() identity. Best effort and idempotent: a versioned record is left
+// alone when a bare record already exists. Persisted on the next state write.
+func migrateVersionedKeys(st *state) {
+	for key, plugin := range st.Plugins {
+		name, version, found := strings.Cut(key, "@")
+		if !found || strings.TrimSpace(name) == "" || plugin.Source != "marketplace" {
+			continue
+		}
+		if _, exists := st.Plugins[name]; exists {
+			continue
+		}
+		if plugin.InstalledVersion == "" {
+			plugin.InstalledVersion = strings.TrimSpace(version)
+		}
+		plugin.Ref.Version = ""
+		plugin.Ref.Name = name
+		st.Plugins[name] = plugin
+		delete(st.Plugins, key)
+		prefix := key + "#"
+		for instKey, instance := range st.Instances {
+			rest, ok := strings.CutPrefix(instKey, prefix)
+			if !ok {
+				continue
+			}
+			target := name + "#" + rest
+			if _, exists := st.Instances[target]; exists {
+				continue
+			}
+			instance.Plugin.Version = ""
+			instance.Plugin.Name = name
+			st.Instances[target] = instance
+			delete(st.Instances, instKey)
+		}
+	}
 }
 
 func (b *Backend) writeState(st state) error {
@@ -3119,35 +3317,49 @@ func marketplaceRuntime(entry sdkmanifest.PluginEntry) management.RuntimeSpec {
 	return management.RuntimeSpec{Kind: "stdio", Command: command, Path: localPath}
 }
 
-func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.Ref, entry sdkmanifest.PluginEntry, preferRemote bool) (management.RuntimeSpec, map[string]string, error) {
+// prepareMarketplaceRuntime resolves a marketplace entry into a runnable
+// runtime. The returned string is the resolved module version of the produced
+// binary (go_install artifacts only; empty for local builds and PATH reuse).
+// When ref.Version is set the entry must resolve through go_install at exactly
+// that version — local builds and PATH binaries are skipped.
+func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.Ref, entry sdkmanifest.PluginEntry, preferRemote bool) (management.RuntimeSpec, map[string]string, string, error) {
 	binary := marketplaceBinaryName(ref, entry)
 	binPath := filepath.Join(b.binDir, executableName(binary))
 	localPath := strings.TrimSpace(entry.LocalPath)
-	if !preferRemote && localPath != "" && strings.TrimSpace(entry.Binary) != "" {
+	version := strings.TrimSpace(ref.Version)
+	if version == "" && !preferRemote && localPath != "" && strings.TrimSpace(entry.Binary) != "" {
 		cmdDir := filepath.Join(localPath, "cmd", strings.TrimSpace(entry.Binary))
 		if info, err := os.Stat(cmdDir); err == nil && info.IsDir() {
 			if err := b.buildLocalMarketplaceBinary(ctx, localPath, strings.TrimSpace(entry.Binary), binPath); err != nil {
-				return management.RuntimeSpec{}, nil, err
+				return management.RuntimeSpec{}, nil, "", err
 			}
-			return cachedRuntime(binPath), artifactLabels(binPath, "local_build"), nil
+			return cachedRuntime(binPath), artifactLabels(binPath, "local_build"), "", nil
 		}
 	}
-	if preferPathBinary(preferRemote, entry) {
+	if version == "" && preferPathBinary(preferRemote, entry) {
 		if path, err := exec.LookPath(strings.TrimSpace(entry.Binary)); err == nil {
-			return management.RuntimeSpec{Kind: "stdio", Command: path}, artifactLabels(path, "path"), nil
+			return management.RuntimeSpec{Kind: "stdio", Command: path}, artifactLabels(path, "path"), "", nil
 		}
 	}
 	if strings.TrimSpace(entry.GoInstall) != "" {
-		if err := b.goInstallMarketplaceBinary(ctx, entry.GoInstall); err != nil {
-			return management.RuntimeSpec{}, nil, err
+		spec := strings.TrimSpace(entry.GoInstall)
+		if version != "" {
+			base, _, _ := strings.Cut(spec, "@")
+			spec = base + "@" + version
+		}
+		if err := b.goInstallMarketplaceBinary(ctx, spec); err != nil {
+			return management.RuntimeSpec{}, nil, "", err
 		}
 		installed := filepath.Join(b.binDir, executableName(binary))
 		if _, err := os.Stat(installed); err != nil {
-			return management.RuntimeSpec{}, nil, fmt.Errorf("fluxplane-plugin: go install %q did not produce %q", entry.GoInstall, installed)
+			return management.RuntimeSpec{}, nil, "", fmt.Errorf("fluxplane-plugin: go install %q did not produce %q", spec, installed)
 		}
-		return cachedRuntime(installed), artifactLabels(installed, "go_install"), nil
+		return cachedRuntime(installed), artifactLabels(installed, "go_install"), inspectInstalledModuleVersion(ctx, installed), nil
 	}
-	return management.RuntimeSpec{}, nil, fmt.Errorf("fluxplane-plugin: marketplace plugin %q has no local command, PATH binary, or go_install source", ref.Key())
+	if version != "" {
+		return management.RuntimeSpec{}, nil, "", fmt.Errorf("fluxplane-plugin: marketplace plugin %q has no go_install source; cannot install pinned version %s", ref.Name, version)
+	}
+	return management.RuntimeSpec{}, nil, "", fmt.Errorf("fluxplane-plugin: marketplace plugin %q has no local command, PATH binary, or go_install source", ref.Key())
 }
 
 // preferPathBinary reports whether to resolve a plugin to an existing PATH
@@ -3185,11 +3397,16 @@ func (b *Backend) buildLocalMarketplaceBinary(ctx context.Context, localPath, bi
 }
 
 func (b *Backend) goInstallMarketplaceBinary(ctx context.Context, source string) error {
-	if err := os.MkdirAll(b.binDir, 0o700); err != nil {
+	return goInstallBinary(ctx, b.binDir, source)
+}
+
+// goInstallBinary runs `go install source` into binDir. Overridable in tests.
+var goInstallBinary = func(ctx context.Context, binDir, source string) error {
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return fmt.Errorf("fluxplane-plugin: create plugin bin dir: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, "go", "install", strings.TrimSpace(source))
-	cmd.Env = append(os.Environ(), "GOBIN="+b.binDir)
+	cmd.Env = append(os.Environ(), "GOBIN="+binDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -3200,6 +3417,24 @@ func (b *Backend) goInstallMarketplaceBinary(ctx context.Context, source string)
 		return fmt.Errorf("fluxplane-plugin: go install marketplace plugin %q: %s", source, msg)
 	}
 	return nil
+}
+
+// inspectInstalledModuleVersion reports the module version embedded in a
+// go-installed binary via `go version -m`. Best effort: returns "" when the
+// binary carries no module stamp. Overridable in tests.
+var inspectInstalledModuleVersion = func(ctx context.Context, path string) string {
+	cmd := exec.CommandContext(ctx, "go", "version", "-m", path)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) >= 3 && fields[0] == "mod" {
+			return strings.TrimSpace(fields[2])
+		}
+	}
+	return ""
 }
 
 func (b *Backend) removeOwnedArtifact(plugin storedPlugin) error {

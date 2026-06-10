@@ -604,6 +604,9 @@ var skillStateChangingCommands = map[string]bool{
 	"fluxplane-plugin auth test":         true,
 	"fluxplane-plugin auth disconnect":   true,
 	"fluxplane-plugin dev sync":          true,
+	"fluxplane-plugin pin":               true,
+	"fluxplane-plugin unpin":             true,
+	"fluxplane-plugin rollback":          true,
 }
 
 // refreshSkillsAfterStateChange regenerates installed skills after a successful,

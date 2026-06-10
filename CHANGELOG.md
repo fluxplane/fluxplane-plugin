@@ -2,6 +2,43 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.9.0
+
+CLI lifecycle polish: version pinning, process visibility, one-stop describe,
+shell completion.
+
+### Added
+- **Version pinning + rollback.** Installed plugins now record
+  `installed_version` (from the binary's module stamp) and
+  `previous_version`. `pin PLUGIN[@VERSION]` holds a plugin (reinstalling at
+  the requested version first when it differs); `upgrade` and `install --all`
+  skip pinned plugins with `"reason": "pinned to vX"`; `unpin` releases the
+  hold; `rollback PLUGIN` swaps back to the previous version (twice
+  round-trips; refuses while pinned). Batch install results now echo the
+  resolved `version`. Backend capability: optional `management.VersionManager`.
+- **`install plugin@version` actually installs that version.** The requested
+  version is threaded into the `go install` spec (previously it only changed
+  the state key, silently installing `@latest`). Marketplace installs are now
+  stored under the bare plugin name; legacy `name@version` records migrate
+  automatically.
+- **`process` command group.** `process list [--group|--plugin|--label]`
+  lists host-managed background processes (e.g. kubernetes port-forwards)
+  across plugins with PID liveness; `process logs ID [-n N] [--follow]` tails
+  the process log; `process stop ID` signals the process group and removes
+  the record. Process records now carry the owning plugin/instance
+  (`host.ProcessRecord.Plugin/Instance`, `ProcessListRequest.Plugin` filter).
+  Backend capability: optional `management.ProcessManager`.
+- **`describe PLUGIN`** aggregates status, versions (installed/pinned/
+  previous/manifest), binary provenance, auth state, product-matched
+  endpoints, an operation summary (count, read-only count, groups, examples
+  present), and datasources in one JSON view; per-section failures land under
+  `errors` without failing the command.
+- **Dynamic shell completion** for plugin names (all PLUGIN-arg commands),
+  operation names (`operation invoke|describe`, cache-served with a 2s
+  guard), and process IDs. `completion fish|bash|zsh` documented in README.
+- **`operation invoke|batch --timeout 30s`** bounds an invocation with a
+  context deadline.
+
 ## v0.8.0
 
 ### Added

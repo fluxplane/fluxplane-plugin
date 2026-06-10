@@ -7,6 +7,7 @@ import (
 	"time"
 
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
+	sdkhost "github.com/fluxplane/fluxplane-plugin/host"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
 )
@@ -95,6 +96,15 @@ type Plugin struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	InstalledAt time.Time         `json:"installed_at,omitempty"`
 	UpdatedAt   time.Time         `json:"updated_at,omitempty"`
+	// InstalledVersion is the resolved module version of the current binary
+	// (go_install artifacts only; empty for local/dev builds).
+	InstalledVersion string `json:"installed_version,omitempty"`
+	// PreviousVersion is the version replaced by the most recent
+	// install/upgrade, kept for rollback.
+	PreviousVersion string `json:"previous_version,omitempty"`
+	// Pinned holds the version the plugin is held at; upgrade and
+	// install --all skip pinned plugins. Empty means unpinned.
+	Pinned string `json:"pinned,omitempty"`
 }
 
 // StatusRequest filters plugin status.
@@ -611,6 +621,52 @@ type Installer interface {
 // implement it; the CLI detects it via a type assertion.
 type LocalSyncer interface {
 	SyncLocalPlugins(context.Context, SyncRequest) (SyncResult, error)
+}
+
+// PinRequest pins or unpins an installed plugin. The version to pin comes from
+// Ref.Version; when empty the currently installed version is used.
+type PinRequest struct {
+	Ref    Ref  `json:"ref"`
+	Unpin  bool `json:"unpin,omitempty"`
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// PinResult reports the pin state after the change.
+type PinResult struct {
+	Plugin  Plugin `json:"plugin"`
+	Pinned  string `json:"pinned,omitempty"`
+	Changed bool   `json:"changed"`
+}
+
+// RollbackRequest reverts a plugin to its previously installed version.
+type RollbackRequest struct {
+	Ref    Ref  `json:"ref"`
+	DryRun bool `json:"dry_run,omitempty"`
+}
+
+// RollbackResult reports the version swap performed by a rollback.
+type RollbackResult struct {
+	Plugin     Plugin `json:"plugin"`
+	RolledBack bool   `json:"rolled_back"`
+	From       string `json:"from,omitempty"`
+	To         string `json:"to,omitempty"`
+}
+
+// VersionManager is an optional backend capability for pinning installed
+// plugins at a version and rolling back to the previously installed one. The
+// CLI detects it via a type assertion.
+type VersionManager interface {
+	PinPlugin(context.Context, PinRequest) (PinResult, error)
+	RollbackPlugin(context.Context, RollbackRequest) (RollbackResult, error)
+}
+
+// ProcessManager is an optional backend capability exposing host-managed
+// background processes (started by plugins through the host process
+// capability, e.g. kubernetes port-forwards). The CLI detects it via a type
+// assertion.
+type ProcessManager interface {
+	ListProcesses(context.Context, sdkhost.ProcessListRequest) (sdkhost.ProcessListResponse, error)
+	StopProcess(context.Context, sdkhost.ProcessStopRequest) (sdkhost.ProcessStopResponse, error)
 }
 
 // Store lists, inspects, activates, and removes installed plugins.
