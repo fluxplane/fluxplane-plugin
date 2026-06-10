@@ -28,6 +28,15 @@ type ProcessStartRequest = sdkhost.ProcessStartRequest
 type ProcessStartResponse = sdkhost.ProcessStartResponse
 type ProcessStopRequest = sdkhost.ProcessStopRequest
 type ProcessStopResponse = sdkhost.ProcessStopResponse
+type ProcessListRequest = sdkhost.ProcessListRequest
+type ProcessListResponse = sdkhost.ProcessListResponse
+type ProcessRecord = sdkhost.ProcessRecord
+
+// ProcessLister is the optional host capability for listing host-managed
+// background processes started via ProcessStart; type-assert ctx.Host
+// against it (mirrors the ConnDialer pattern).
+type ProcessLister = sdkhost.ProcessLister
+
 type ProviderCallRequest = sdkhost.ProviderCallRequest
 type ProviderCallResponse = sdkhost.ProviderCallResponse
 type ConnDialer = sdkhost.ConnDialer

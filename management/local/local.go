@@ -293,6 +293,7 @@ type storedProcess struct {
 	Plugin       string            `json:"plugin,omitempty"`
 	Instance     string            `json:"instance,omitempty"`
 	Group        string            `json:"group,omitempty"`
+	Label        string            `json:"label,omitempty"`
 	Tags         []string          `json:"tags,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	StartedAt    time.Time         `json:"started_at,omitempty"`
@@ -1668,6 +1669,8 @@ func (h cliHost) CallHost(command string, payload any) (json.RawMessage, error) 
 		return h.processStart(payload)
 	case protocol.HostCapabilityProcessStop:
 		return h.processStop(payload)
+	case protocol.HostCapabilityProcessList:
+		return h.processList(payload)
 	case protocol.HostCapabilityProviderCall:
 		var req sdkhost.ProviderCallRequest
 		if err := decodeHostPayload(payload, &req); err != nil {
@@ -1978,7 +1981,8 @@ func (h cliHost) processStart(payload any) (json.RawMessage, error) {
 	record := storedProcess{
 		ID: id, Command: command, Args: append([]string(nil), req.Args...), Workdir: strings.TrimSpace(req.Workdir),
 		PID: pid, ProcessGroup: pid, LogPath: logPath, Plugin: h.plugin, Instance: h.instance, Group: strings.TrimSpace(req.Group),
-		Tags: append([]string(nil), req.Tags...), Metadata: cloneStringMap(req.Metadata), StartedAt: startedAt,
+		Label: strings.TrimSpace(req.Label),
+		Tags:  append([]string(nil), req.Tags...), Metadata: cloneStringMap(req.Metadata), StartedAt: startedAt,
 	}
 	if err := h.storeProcess(record); err != nil {
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
@@ -2010,6 +2014,59 @@ func (h cliHost) processStop(payload any) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.Marshal(resp)
+}
+
+// processList returns the host-managed background process records, filtered by
+// group/label, each probed for PID liveness so callers can tell a running
+// forward from a dead record.
+func (h cliHost) processList(payload any) (json.RawMessage, error) {
+	var req sdkhost.ProcessListRequest
+	if err := decodeHostPayload(payload, &req); err != nil {
+		return nil, err
+	}
+	if h.backend == nil {
+		return nil, fmt.Errorf("process store is unavailable")
+	}
+	st, err := h.backend.readState()
+	if err != nil {
+		return nil, err
+	}
+	group := strings.TrimSpace(req.Group)
+	label := strings.TrimSpace(req.Label)
+	resp := sdkhost.ProcessListResponse{Processes: []sdkhost.ProcessRecord{}}
+	for _, record := range st.Processes {
+		if group != "" && record.Group != group {
+			continue
+		}
+		if label != "" && record.Label != label {
+			continue
+		}
+		resp.Processes = append(resp.Processes, sdkhost.ProcessRecord{
+			ID:        record.ID,
+			Command:   record.Command,
+			Args:      append([]string(nil), record.Args...),
+			Workdir:   record.Workdir,
+			PID:       record.PID,
+			Group:     record.Group,
+			Label:     record.Label,
+			Tags:      append([]string(nil), record.Tags...),
+			Metadata:  cloneStringMap(record.Metadata),
+			LogPath:   record.LogPath,
+			StartedAt: record.StartedAt,
+			Alive:     processAlive(record.PID),
+		})
+	}
+	sort.Slice(resp.Processes, func(i, j int) bool { return resp.Processes[i].StartedAt.Before(resp.Processes[j].StartedAt) })
+	resp.Count = len(resp.Processes)
+	return json.Marshal(resp)
+}
+
+// processAlive reports whether a PID currently exists (signal 0 probe).
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
 }
 
 func (h cliHost) httpDo(payload any) (json.RawMessage, error) {

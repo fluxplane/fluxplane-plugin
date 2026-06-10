@@ -48,6 +48,7 @@ const (
 	HostCapabilityProcessRun   = "host.capability.process.run"
 	HostCapabilityProcessStart = "host.capability.process.start"
 	HostCapabilityProcessStop  = "host.capability.process.stop"
+	HostCapabilityProcessList  = "host.capability.process.list"
 	HostCapabilityProviderCall = "host.capability.provider.call"
 	HostCapabilityConnDial     = "host.capability.conn.dial"
 	HostCapabilityConnRead     = "host.capability.conn.read"

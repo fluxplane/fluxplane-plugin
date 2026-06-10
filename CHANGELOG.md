@@ -2,6 +2,17 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.8.0
+
+### Added
+- **`process.list` host capability** (`host.ProcessLister`, optional interface
+  mirroring the ConnDialer pattern — existing hosts and test doubles are
+  unaffected). Lists host-managed background processes started via
+  `ProcessStart`, filtered by group/label, each record probed for PID
+  liveness (`alive`) so a caller can tell a running forward/tunnel from a
+  dead one. Stopped processes are removed from the store; self-died ones stay
+  listed with `alive:false`. `ProcessStart`'s `label` is now persisted.
+
 ## v0.7.0
 
 Agent-usability pass driven by friction hit in real sessions:

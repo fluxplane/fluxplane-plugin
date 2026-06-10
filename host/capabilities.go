@@ -163,6 +163,36 @@ type ProcessStopResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// ProcessListRequest filters the host's started-process records. Empty fields
+// match everything; Group/Label match exactly.
+type ProcessListRequest struct {
+	Group string `json:"group,omitempty"`
+	Label string `json:"label,omitempty"`
+}
+
+// ProcessRecord is one host-managed background process started via
+// ProcessStart. Alive reports whether the PID still exists at list time, so a
+// caller can tell a running forward/tunnel from a dead record.
+type ProcessRecord struct {
+	ID        string            `json:"id"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args,omitempty"`
+	Workdir   string            `json:"workdir,omitempty"`
+	PID       int               `json:"pid,omitempty"`
+	Group     string            `json:"group,omitempty"`
+	Label     string            `json:"label,omitempty"`
+	Tags      []string          `json:"tags,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	LogPath   string            `json:"log_path,omitempty"`
+	StartedAt time.Time         `json:"started_at,omitempty"`
+	Alive     bool              `json:"alive"`
+}
+
+type ProcessListResponse struct {
+	Processes []ProcessRecord `json:"processes"`
+	Count     int             `json:"count"`
+}
+
 type ProviderCallRequest struct {
 	Provider string          `json:"provider"`
 	Action   string          `json:"action"`
@@ -189,8 +219,8 @@ type ConnTLS struct {
 // handle. Address may be supplied directly or resolved from a registered
 // endpoint via EndpointRef (never from the environment at call time).
 type ConnDialRequest struct {
-	Network     string   `json:"network"`               // "tcp" | "unix"
-	Address     string   `json:"address,omitempty"`     // host:port or socket path
+	Network     string   `json:"network"`           // "tcp" | "unix"
+	Address     string   `json:"address,omitempty"` // host:port or socket path
 	EndpointRef string   `json:"endpoint_ref,omitempty"`
 	TLS         *ConnTLS `json:"tls,omitempty"`
 	TimeoutMS   int      `json:"timeout_ms,omitempty"`

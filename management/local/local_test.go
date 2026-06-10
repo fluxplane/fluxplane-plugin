@@ -108,6 +108,119 @@ func TestCLIHostProcessRun(t *testing.T) {
 	}
 }
 
+func TestCLIHostProcessStartListStop(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	host := cliHost{backend: backend, plugin: "test", instance: "default"}
+
+	startRaw, err := host.CallHost(protocol.HostCapabilityProcessStart, sdkhost.ProcessStartRequest{
+		Command:  "sleep",
+		Args:     []string{"30"},
+		Group:    "kubernetes.portforward",
+		Label:    "homer-webapp",
+		Metadata: map[string]string{"namespace": "latest"},
+	})
+	if err != nil {
+		t.Fatalf("process start: %v", err)
+	}
+	var started sdkhost.ProcessStartResponse
+	if err := json.Unmarshal(startRaw, &started); err != nil {
+		t.Fatalf("decode start: %v", err)
+	}
+	if started.ID == "" || started.PID == 0 {
+		t.Fatalf("start = %#v", started)
+	}
+	defer func() {
+		_, _ = host.stopStoredProcess(sdkhost.ProcessStopRequest{ID: started.ID, Signal: "SIGKILL"})
+	}()
+
+	// list with group filter sees the live process
+	listRaw, err := host.CallHost(protocol.HostCapabilityProcessList, sdkhost.ProcessListRequest{Group: "kubernetes.portforward"})
+	if err != nil {
+		t.Fatalf("process list: %v", err)
+	}
+	var listed sdkhost.ProcessListResponse
+	if err := json.Unmarshal(listRaw, &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if listed.Count != 1 || listed.Processes[0].ID != started.ID || !listed.Processes[0].Alive {
+		t.Fatalf("list = %#v", listed)
+	}
+	record := listed.Processes[0]
+	if record.Label != "homer-webapp" || record.Metadata["namespace"] != "latest" || record.PID != started.PID {
+		t.Fatalf("record = %#v", record)
+	}
+
+	// non-matching filters return empty
+	emptyRaw, err := host.CallHost(protocol.HostCapabilityProcessList, sdkhost.ProcessListRequest{Group: "other"})
+	if err != nil {
+		t.Fatalf("process list other: %v", err)
+	}
+	var empty sdkhost.ProcessListResponse
+	if err := json.Unmarshal(emptyRaw, &empty); err != nil {
+		t.Fatalf("decode empty: %v", err)
+	}
+	if empty.Count != 0 {
+		t.Fatalf("expected empty list, got %#v", empty)
+	}
+
+	// a process that died on its own stays listed with alive=false
+	dieRaw, err := host.CallHost(protocol.HostCapabilityProcessStart, sdkhost.ProcessStartRequest{
+		Command: "sleep", Args: []string{"0.05"}, Group: "kubernetes.portforward", Label: "short-lived",
+	})
+	if err != nil {
+		t.Fatalf("process start short-lived: %v", err)
+	}
+	var died sdkhost.ProcessStartResponse
+	if err := json.Unmarshal(dieRaw, &died); err != nil {
+		t.Fatalf("decode short-lived start: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		listRaw, err = host.CallHost(protocol.HostCapabilityProcessList, sdkhost.ProcessListRequest{Label: "short-lived"})
+		if err != nil {
+			t.Fatalf("process list short-lived: %v", err)
+		}
+		listed = sdkhost.ProcessListResponse{}
+		if err := json.Unmarshal(listRaw, &listed); err != nil {
+			t.Fatalf("decode short-lived list: %v", err)
+		}
+		if listed.Count == 1 && !listed.Processes[0].Alive {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("short-lived process never reported dead: %#v", listed)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// stop removes the record entirely
+	stopRaw, err := host.CallHost(protocol.HostCapabilityProcessStop, sdkhost.ProcessStopRequest{ID: started.ID, Signal: "SIGKILL"})
+	if err != nil {
+		t.Fatalf("process stop: %v", err)
+	}
+	var stopped sdkhost.ProcessStopResponse
+	if err := json.Unmarshal(stopRaw, &stopped); err != nil {
+		t.Fatalf("decode stop: %v", err)
+	}
+	if !stopped.Stopped {
+		t.Fatalf("stop = %#v", stopped)
+	}
+	listRaw, err = host.CallHost(protocol.HostCapabilityProcessList, sdkhost.ProcessListRequest{Group: "kubernetes.portforward", Label: "homer-webapp"})
+	if err != nil {
+		t.Fatalf("process list after stop: %v", err)
+	}
+	listed = sdkhost.ProcessListResponse{}
+	if err := json.Unmarshal(listRaw, &listed); err != nil {
+		t.Fatalf("decode list after stop: %v", err)
+	}
+	if listed.Count != 0 {
+		t.Fatalf("stopped process should be removed from the list: %#v", listed)
+	}
+}
+
 func TestCLIHostBlobStore(t *testing.T) {
 	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
 	if err != nil {

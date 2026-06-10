@@ -49,6 +49,15 @@ type ConnDialer interface {
 	ConnClose(input ConnCloseRequest) (ConnCloseResponse, error)
 }
 
+// ProcessLister is an optional host capability for listing host-managed
+// background processes started via ProcessStart. Kept separate from Client
+// (like ConnDialer) so existing hosts and test doubles are unaffected;
+// callers type-assert a Client to ProcessLister. The SDK-provided Client
+// always satisfies it.
+type ProcessLister interface {
+	ProcessList(input ProcessListRequest) (ProcessListResponse, error)
+}
+
 type client struct {
 	caller protocol.HostCaller
 }
@@ -135,6 +144,12 @@ func (h client) ProcessRun(input ProcessRunRequest) (ProcessRunResponse, error) 
 func (h client) ProcessStart(input ProcessStartRequest) (ProcessStartResponse, error) {
 	var out ProcessStartResponse
 	err := h.call(protocol.HostCapabilityProcessStart, input, &out)
+	return out, err
+}
+
+func (h client) ProcessList(input ProcessListRequest) (ProcessListResponse, error) {
+	var out ProcessListResponse
+	err := h.call(protocol.HostCapabilityProcessList, input, &out)
 	return out, err
 }
 
