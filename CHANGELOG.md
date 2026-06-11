@@ -2,6 +2,22 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.17.0
+
+### Added
+- **`monitor connect` auto-imports discovered credentials** (with
+  fluxplane-plugins kubernetes/v0.8.0): when endpoint discovery surfaces a
+  credential secret for a product (`credential_ref` +
+  `credential_fields`), the secret is read from the cluster via
+  `kubernetes.secret.read` and stored as the product plugin's auth through
+  the regular auth-connect path (validation + secret store). Wiring the
+  shared infra Grafana is now a single `monitor connect` — endpoint and
+  admin credentials both land automatically. Entries report
+  `auth_connected`/`auth_fields` (field names only — values never appear in
+  output, logs, or errors). Already-connected auth is left untouched unless
+  `--refresh-auth` is passed; auth-import failures are entry-level info and
+  never fail the endpoint registration.
+
 ## v0.16.1
 
 ### Fixed
