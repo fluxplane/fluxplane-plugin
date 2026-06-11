@@ -192,7 +192,13 @@ func (f *fakeBackend) IndexStatus(_ context.Context, req management.IndexStatusR
 }
 
 func (f *fakeBackend) DiscoverEndpoints(_ context.Context, req management.EndpointDiscoverRequest) (management.EndpointDiscoverResult, error) {
-	f.discovered = req
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Record the FIRST request: empty candidates trigger the discovery
+	// fan-out, which issues further requests for other plugins.
+	if f.discovered.Ref.Name == "" {
+		f.discovered = req
+	}
 	return management.EndpointDiscoverResult{Plugin: req.Ref, Instance: req.Instance, Result: []byte(`{"candidates":[]}`)}, nil
 }
 
