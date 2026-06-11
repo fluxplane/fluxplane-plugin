@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 
 	"github.com/fluxplane/fluxplane-plugin/management"
@@ -27,10 +28,15 @@ func TestRankOperationMatches(t *testing.T) {
 		t.Fatalf("read-only filter = %#v", ro)
 	}
 
-	// multi-term AND: both terms must appear
+	// multi-term OR with ranking: every issue-op matches, but the operation
+	// covering both terms ranks first with full matched_terms.
 	multi := rankOperationMatches("create issue", "jira", ops, false, false)
-	if len(multi) != 1 || multi[0].Operation != "jira.issue.create" {
-		t.Fatalf("multi-term = %#v", multi)
+	if len(multi) != 3 {
+		t.Fatalf("multi-term = %#v, want all issue ops", multi)
+	}
+	sort.SliceStable(multi, func(i, j int) bool { return multi[i].score > multi[j].score })
+	if multi[0].Operation != "jira.issue.create" || multi[0].MatchedTerms != 2 {
+		t.Fatalf("multi-term ranking = %#v", multi)
 	}
 
 	// no match
@@ -125,5 +131,35 @@ func TestOperationSearchPluginFilter(t *testing.T) {
 	}
 	if len(backend.fakeBackend.listOpsReqs) != 1 {
 		t.Fatalf("expected exactly one plugin queried, got %d", len(backend.fakeBackend.listOpsReqs))
+	}
+}
+
+func TestOperationSearchRanksPartialTermMatches(t *testing.T) {
+	backend := &searchBackend{
+		fakeBackend: &fakeBackend{},
+		byPlugin: map[string][]sdkmanifest.OperationSpec{
+			"jira": {
+				{Name: "slack.thread", Description: "View a Slack thread."},
+				{Name: "slack.message.list", Description: "Read recent messages from a Slack channel."},
+			},
+		},
+	}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	// The report's exact failing query: only one of three terms appears in
+	// the operation — OR semantics must still surface it, ranked first.
+	cmd.SetArgs([]string{"operation", "search", "thread", "replies", "history", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	var res operationSearchResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if len(res.Matches) == 0 || res.Matches[0].Operation != "slack.thread" {
+		t.Fatalf("matches = %#v, want slack.thread first", res.Matches)
+	}
+	if res.Matches[0].MatchedTerms != 1 {
+		t.Fatalf("matched_terms = %d, want 1", res.Matches[0].MatchedTerms)
 	}
 }

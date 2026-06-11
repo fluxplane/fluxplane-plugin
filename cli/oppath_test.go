@@ -90,3 +90,31 @@ func TestInvokeFieldSingleAndMulti(t *testing.T) {
 
 func contains(s, sub string) bool { return bytes.Contains([]byte(s), []byte(sub)) }
 func trimSpace(s string) string   { return string(bytes.TrimSpace([]byte(s))) }
+
+func TestMissingFieldListsAvailableKeys(t *testing.T) {
+	res := management.OperationInvokeResult{Result: []byte(`{"record":{"iid":1,"title":"x"},"count":1}`)}
+	var out bytes.Buffer
+	missing, err := printOperationResultStrict(&out, res, false, []string{"record.content"})
+	if err != nil || !missing {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+	var decoded struct {
+		Missing   []string `json:"missing"`
+		Available []string `json:"available"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if len(decoded.Available) != 2 || decoded.Available[0] != "iid" || decoded.Available[1] != "title" {
+		t.Fatalf("available = %#v, want keys at the deepest resolvable point", decoded.Available)
+	}
+	// Top-level miss lists top-level keys.
+	out.Reset()
+	_, _ = printOperationResultStrict(&out, res, false, []string{"content"})
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode top: %v", err)
+	}
+	if len(decoded.Available) != 2 || decoded.Available[0] != "count" || decoded.Available[1] != "record" {
+		t.Fatalf("available top = %#v", decoded.Available)
+	}
+}

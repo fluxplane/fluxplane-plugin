@@ -1470,3 +1470,52 @@ func TestIndexRecordScoreSkipsTokenFallbackForURLs(t *testing.T) {
 		t.Fatal("token fallback must stay active for plain text")
 	}
 }
+
+func TestBlobWritePreservesFilenameInPath(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	host := cliHost{backend: backend, plugin: "slack", instance: "default"}
+	raw, err := host.CallHost(protocol.HostCapabilityBlobWrite, sdkhost.BlobWriteRequest{
+		Content:   []byte("png-bytes"),
+		Filename:  "incident screenshot.png",
+		MediaType: "image/png",
+	})
+	if err != nil {
+		t.Fatalf("BlobWrite: %v", err)
+	}
+	var blob sdkhost.BlobRef
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasSuffix(blob.Path, "incident_screenshot.png") {
+		t.Fatalf("path = %q, want sanitized filename with extension", blob.Path)
+	}
+	if strings.HasSuffix(blob.Path, ".bin") {
+		t.Fatalf("path = %q, must not be an opaque .bin", blob.Path)
+	}
+	// Round-trips through read.
+	readRaw, err := host.CallHost(protocol.HostCapabilityBlobRead, sdkhost.BlobReadRequest{Ref: blob.Ref})
+	if err != nil {
+		t.Fatalf("BlobRead: %v", err)
+	}
+	var read sdkhost.BlobReadResponse
+	if err := json.Unmarshal(readRaw, &read); err != nil {
+		t.Fatalf("decode read: %v", err)
+	}
+	if string(read.Content) != "png-bytes" {
+		t.Fatalf("content = %q", read.Content)
+	}
+	// Explicit refs keep their .bin behavior.
+	raw, err = host.CallHost(protocol.HostCapabilityBlobWrite, sdkhost.BlobWriteRequest{Ref: "export/data", Content: []byte("x")})
+	if err != nil {
+		t.Fatalf("BlobWrite explicit ref: %v", err)
+	}
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasSuffix(blob.Path, ".bin") {
+		t.Fatalf("explicit-ref path = %q, want .bin", blob.Path)
+	}
+}

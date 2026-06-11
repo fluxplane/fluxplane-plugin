@@ -12,14 +12,15 @@ import (
 )
 
 type operationMatch struct {
-	Plugin      string                  `json:"plugin"`
-	Operation   string                  `json:"operation"`
-	Description string                  `json:"description,omitempty"`
-	Required    []string                `json:"required,omitempty"`
-	ReadOnly    bool                    `json:"read_only,omitempty"`
-	Fields      []operationFieldSummary `json:"input_fields,omitempty"`
-	Example     string                  `json:"example,omitempty"`
-	score       int
+	Plugin       string                  `json:"plugin"`
+	Operation    string                  `json:"operation"`
+	Description  string                  `json:"description,omitempty"`
+	Required     []string                `json:"required,omitempty"`
+	ReadOnly     bool                    `json:"read_only,omitempty"`
+	MatchedTerms int                     `json:"matched_terms,omitempty"`
+	Fields       []operationFieldSummary `json:"input_fields,omitempty"`
+	Example      string                  `json:"example,omitempty"`
+	score        int
 }
 
 type operationSearchResult struct {
@@ -38,9 +39,10 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
 		Short: "Find operations across installed plugins by name and description",
-		Long: "Searches installed, enabled plugins for operations whose name or description match the " +
-			"query (all whitespace-separated terms must appear). Ranked best-first. Use --plugin to " +
-			"restrict which plugins are queried, --read-only to list only read-only operations.",
+		Long: "Searches installed, enabled plugins for operations whose name or description match ANY " +
+			"of the whitespace-separated terms, ranked best-first (name hits and full term coverage " +
+			"rank higher; matched_terms shows partial matches). Use --plugin to restrict which " +
+			"plugins are queried, --read-only to list only read-only operations.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := backendRequired(backend); err != nil {
@@ -134,44 +136,45 @@ func rankOperationMatches(query, plugin string, ops []sdkmanifest.OperationSpec,
 		}
 		lowerName := strings.ToLower(name)
 		lowerDesc := strings.ToLower(strings.TrimSpace(op.Description))
-		haystack := lowerName + " " + lowerDesc
-		matchedAll := true
+		// OR semantics: any matching term keeps the operation; ranking rewards
+		// name hits over description hits and full term coverage over partial,
+		// so not knowing the plugin's exact noun still finds the operation.
+		matched := 0
+		score := 0
 		for _, term := range terms {
-			if !strings.Contains(haystack, term) {
-				matchedAll = false
-				break
+			switch {
+			case strings.Contains(lowerName, term):
+				matched++
+				score += 15
+			case strings.Contains(lowerDesc, term):
+				matched++
+				score += 5
 			}
 		}
-		if !matchedAll {
+		if matched == 0 {
 			continue
 		}
-		score := 0
+		if matched == len(terms) {
+			score += 20
+		}
 		joined := strings.Join(terms, " ")
 		switch {
 		case lowerName == joined:
 			score = 100
 		case strings.HasPrefix(lowerName, joined):
-			score = 60
+			score = max(score, 60)
 		case strings.Contains(lowerName, joined):
-			score = 40
-		default:
-			// terms matched but not as a contiguous name hit
-			for _, term := range terms {
-				if strings.Contains(lowerName, term) {
-					score += 15
-				} else {
-					score += 5 // description-only hit
-				}
-			}
+			score = max(score, 40)
 		}
 		schema := parseOperationInputSchema(op)
 		match := operationMatch{
-			Plugin:      plugin,
-			Operation:   name,
-			Description: strings.TrimSpace(op.Description),
-			Required:    schema.Required,
-			ReadOnly:    op.ReadOnly,
-			score:       score,
+			Plugin:       plugin,
+			Operation:    name,
+			Description:  strings.TrimSpace(op.Description),
+			Required:     schema.Required,
+			ReadOnly:     op.ReadOnly,
+			MatchedTerms: matched,
+			score:        score,
 		}
 		if full {
 			// Fold in enough to invoke without a separate `describe` round-trip.

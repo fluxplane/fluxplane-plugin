@@ -2,6 +2,25 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.12.0
+
+Field-report-2 fixes (fluxplane-plugins#5).
+
+### Changed
+- **`operation search` uses OR semantics with coverage ranking** — any term
+  may match (name hits and full-coverage matches rank higher,
+  `matched_terms` shows partial hits), so "thread replies history" finds
+  `slack.thread` instead of returning nothing.
+- **Blob store preserves filenames.** Auto-generated blob refs carry the
+  sanitized requested filename, and the stored path keeps its real extension
+  (`blob-<id>-screenshot.png` instead of `blob-<id>.bin`). Explicit refs are
+  unchanged.
+- **`--field` misses list the available keys** at the deepest resolvable
+  point of the path (`"missing": [...], "available": [...]`) — no more
+  guessing whether the payload nests under `record`.
+- **The "index not built" hint only appears on empty results**; lookups and
+  searches that returned matches no longer repeat it.
+
 ## v0.11.0
 
 ### Changed

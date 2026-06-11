@@ -1435,11 +1435,30 @@ func (b *Backend) CallDatasource(ctx context.Context, req management.DatasourceC
 	result := management.DatasourceCallResult{Plugin: req.Ref, Instance: instance, Capability: capability, Result: copyRaw(resp.Result)}
 	// A lookup/search that fell through to the plugin while the plugin
 	// declares indexes that were never built is a recognizable agent trap:
-	// matches may be silently empty. Surface the remedy alongside the result.
-	if len(snapshots) == 0 && (command == protocol.CommandDatasourcesLookup || command == protocol.CommandDatasourcesSearch) && b.pluginDeclaresIndexes(ctx, plugin, instance) {
+	// matches may be silently empty. Surface the remedy — but only when the
+	// result actually came back empty; repeating the hint next to useful
+	// matches is noise.
+	if len(snapshots) == 0 && (command == protocol.CommandDatasourcesLookup || command == protocol.CommandDatasourcesSearch) &&
+		datasourceResultEmpty(result.Result) && b.pluginDeclaresIndexes(ctx, plugin, instance) {
 		result.Hint = fmt.Sprintf("index not built — run: fluxplane-plugin index build %s", plugin.Ref.Name)
 	}
 	return result, nil
+}
+
+// datasourceResultEmpty reports whether a lookup/search payload carries no
+// matches or records.
+func datasourceResultEmpty(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var decoded struct {
+		Matches []json.RawMessage `json:"matches"`
+		Records []json.RawMessage `json:"records"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	return len(decoded.Matches) == 0 && len(decoded.Records) == 0
 }
 
 // ListContextProviders returns context providers advertised by the plugin manifest.
@@ -1939,6 +1958,12 @@ func (h cliHost) blobWrite(payload any) (json.RawMessage, error) {
 	ref := h.blobRef(req.Ref, req.Path)
 	if ref == "" {
 		ref = "blob-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		// Carry the requested filename into the ref (and therefore the stored
+		// path) so downloads land as blob-<id>-name.ext instead of an opaque
+		// .bin that needs renaming before use.
+		if filename := pathSegment(strings.TrimSpace(req.Filename)); filename != "" && filename != "_" {
+			ref += "-" + filename
+		}
 	}
 	path := h.blobContentPath(ref)
 	if !req.Overwrite {
@@ -1997,7 +2022,12 @@ func (h cliHost) blobDir() string {
 }
 
 func (h cliHost) blobContentPath(ref string) string {
-	return filepath.Join(h.blobDir(), pathSegment(ref)+".bin")
+	segment := pathSegment(ref)
+	// Refs carrying a real filename keep their extension; opaque refs get .bin.
+	if ext := filepath.Ext(segment); len(ext) >= 2 && len(ext) <= 8 && ext != ".bin" {
+		return filepath.Join(h.blobDir(), segment)
+	}
+	return filepath.Join(h.blobDir(), segment+".bin")
 }
 
 func (h cliHost) blobInfoPath(ref string) string {

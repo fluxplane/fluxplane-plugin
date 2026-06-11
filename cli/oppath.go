@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,7 @@ func printOperationResultStrict(w io.Writer, res management.OperationInvokeResul
 	if len(fieldPaths) == 1 {
 		value, ok := extractPath(decoded, fieldPaths[0])
 		if !ok {
-			return true, printJSON(w, map[string]any{"missing": fieldPaths})
+			return true, printJSON(w, map[string]any{"missing": fieldPaths, "available": availableKeysAt(decoded, fieldPaths[0])})
 		}
 		return false, printJSON(w, value)
 	}
@@ -80,8 +81,36 @@ func printOperationResultStrict(w io.Writer, res management.OperationInvokeResul
 	}
 	if len(missing) > 0 {
 		out["missing"] = missing
+		out["available"] = availableKeysAt(decoded, missing[0])
 	}
 	return len(missing) > 0, printJSON(w, out)
+}
+
+// availableKeysAt reports the keys present at the deepest resolvable point of
+// a missing dot-path, so a wrong --field guess shows what to pick instead.
+func availableKeysAt(decoded any, path string) []string {
+	current := decoded
+	for _, segment := range strings.Split(path, ".") {
+		object, ok := current.(map[string]any)
+		if !ok {
+			break
+		}
+		next, ok := object[segment]
+		if !ok {
+			break
+		}
+		current = next
+	}
+	object, ok := current.(map[string]any)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // secretKeyFragments name input fields whose values must be redacted when an
