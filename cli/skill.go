@@ -796,7 +796,7 @@ No plugins are installed yet. Install one from the catalog below, then authentic
 {{- end }}
 {{- range .Plugins }}
 
-### {{ .Name }}{{ if .Version }} ({{ .Version }}){{ end }} — {{ if .Enabled }}enabled{{ else }}disabled{{ end }}{{ if .ManifestError }}, manifest unavailable{{ else if not .HasAuth }}, no auth required{{ else if .AuthConnected }}, auth connected{{ else }}, needs auth{{ end }}
+### {{ .Name }}{{ if .Version }} ({{ .Version }}){{ end }} — {{ if .Enabled }}enabled{{ else }}disabled{{ end }}{{ if .ManifestError }}, manifest unavailable{{ else if not .HasAuth }}, no auth required{{ else if .AuthConnected }}, auth connected{{ else if .AuthRequired }}, needs auth{{ else }}, auth optional{{ end }}
 {{- if .Description }}
 
 {{ .Description }}
@@ -872,7 +872,7 @@ Instance: {{code .Instance}}
 ## Installed integrations
 {{ if .Plugins }}
 {{- range .Plugins }}
-- [{{ .Name }}]({{ .Reference }}){{ if .Description }} — {{ .Description }}{{ end }} ({{ if .Enabled }}enabled{{ else }}disabled{{ end }}; {{ if .ManifestError }}manifest unavailable{{ else if not .HasAuth }}no auth required{{ else if .AuthConnected }}auth connected{{ else }}needs auth{{ end }})
+- [{{ .Name }}]({{ .Reference }}){{ if .Description }} — {{ .Description }}{{ end }} ({{ if .Enabled }}enabled{{ else }}disabled{{ end }}; {{ if .ManifestError }}manifest unavailable{{ else if not .HasAuth }}no auth required{{ else if .AuthConnected }}auth connected{{ else if .AuthRequired }}needs auth{{ else }}auth optional{{ end }})
 {{- end }}
 {{ else }}
 No plugins are installed yet. Install one from the catalog below, then authenticate it.

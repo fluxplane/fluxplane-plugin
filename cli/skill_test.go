@@ -86,7 +86,7 @@ func TestSkillCommandRendersDiscoveryAndInvocations(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	rendered := out.String()
-	if !strings.Contains(rendered, "fluxplane-plugin operation invoke gitlab gitlab.project.list --input '{\"endpoint_ref\":\"<endpoint_ref>\",\"limit\":0}'") {
+	if !strings.Contains(rendered, "fluxplane-plugin operation invoke gitlab gitlab.project.list --input '{\"limit\":0}'") {
 		t.Fatalf("missing generated operation invocation with endpoint_ref:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "name: fluxplane-plugin") {

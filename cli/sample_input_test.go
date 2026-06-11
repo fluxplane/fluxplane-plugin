@@ -31,9 +31,12 @@ func TestSampleInputJSONFallsBackToRequired(t *testing.T) {
 		},
 	}
 	got := sampleInputJSON(schema)
-	for _, want := range []string{`"project_key"`, `"summary"`, `"endpoint_ref"`} {
+	for _, want := range []string{`"project_key"`, `"summary"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("sample = %s, missing %s", got, want)
 		}
+	}
+	if strings.Contains(got, "endpoint_ref") {
+		t.Fatalf("sample = %s, endpoint_ref must not be auto-injected", got)
 	}
 }

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -765,5 +767,182 @@ func TestCommandWithoutBackendFails(t *testing.T) {
 	cmd.SetArgs([]string{"list"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatalf("expected missing backend error")
+	}
+}
+
+func TestRedactEndpointURLMasksPasswords(t *testing.T) {
+	cases := map[string]string{
+		"mysql://user:s3cr3t@db.example.com:3306/app": "mysql://user:xxxxx@db.example.com:3306/app",
+		"https://plain.example.com/path":              "https://plain.example.com/path",
+		"postgres://user@db.example.com/app":          "postgres://user@db.example.com/app",
+		"mysql://user:p@ss with space@host:3306/db":   "mysql://user:xxxxx@ss with space@host:3306/db",
+	}
+	for input, want := range cases {
+		if got := redactEndpointURL(input); got != want {
+			t.Fatalf("redactEndpointURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestEndpointListRedactsCredentials(t *testing.T) {
+	backend := &endpointListFakeBackend{fakeBackend: &fakeBackend{}}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "list"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(out.String(), "s3cr3t") {
+		t.Fatalf("credentials leaked: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "user:xxxxx@") {
+		t.Fatalf("redaction marker missing: %s", out.String())
+	}
+}
+
+type endpointListFakeBackend struct {
+	*fakeBackend
+}
+
+func (b *endpointListFakeBackend) ListEndpoints(context.Context, management.EndpointListRequest) (management.EndpointListResult, error) {
+	ref := fpendpoint.EndpointRef{ID: "aurora", URL: "mysql://user:s3cr3t@db.example.com:3306/app", Product: "mysql"}
+	return management.EndpointListResult{
+		Endpoints: []fpendpoint.EndpointRef{ref},
+		Records:   []fpendpoint.Record{{EndpointRef: ref}},
+	}, nil
+}
+
+func TestOperationListNamesIsCompact(t *testing.T) {
+	backend := &fakeBackend{listOpsFn: func(management.OperationListRequest) (management.OperationListResult, error) {
+		return management.OperationListResult{Operations: []sdkmanifest.OperationSpec{
+			{Name: "x.alpha", Description: "Does alpha. With more detail here.", ReadOnly: true, Input: json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}}}`)},
+			{Name: "x.beta", Description: "Does beta."},
+		}}, nil
+	}}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"operation", "list", "x", "--names"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(out.String(), "properties") {
+		t.Fatalf("--names must not dump schemas: %s", out.String())
+	}
+	var result struct {
+		Operations []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			ReadOnly    bool   `json:"read_only"`
+		} `json:"operations"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if result.Count != 2 || result.Operations[0].Description != "Does alpha." || !result.Operations[0].ReadOnly {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestSampleInputJSONPrefersRepresentativeFields(t *testing.T) {
+	// No required fields, no example: representative optional fields beat an
+	// endpoint_ref-only stub.
+	schema := operationInputSchema{Properties: map[string]operationInputField{
+		"endpoint_ref": {Type: "string"},
+		"ref":          {Type: "string"},
+		"channel":      {Type: "string"},
+		"ts":           {Type: "string"},
+	}}
+	sample := sampleInputJSON(schema)
+	if strings.Contains(sample, "endpoint_ref") {
+		t.Fatalf("sample = %s, must not auto-inject endpoint_ref", sample)
+	}
+	if !strings.Contains(sample, `"ref"`) {
+		t.Fatalf("sample = %s, want representative ref field", sample)
+	}
+	// Required fields still win.
+	schema.Required = []string{"ts"}
+	if sample := sampleInputJSON(schema); !strings.Contains(sample, `"ts"`) {
+		t.Fatalf("sample = %s, want required ts", sample)
+	}
+}
+
+func TestVersionCommandReportsBuildInfo(t *testing.T) {
+	var out bytes.Buffer
+	cmd := New(Options{Backend: &fakeBackend{}, Out: &out})
+	cmd.SetArgs([]string{"version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var info struct {
+		Version string `json:"version"`
+		OS      string `json:"os"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &info); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if info.Version == "" || info.OS == "" {
+		t.Fatalf("info = %#v", info)
+	}
+}
+
+func TestLookupFanoutSkipsUnconfiguredPlugins(t *testing.T) {
+	backend := &lookupFanoutFakeBackend{fakeBackend: &fakeBackend{}}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"lookup", "https://example.test/thing"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var result struct {
+		Results []struct {
+			Plugin  management.Ref `json:"plugin"`
+			Skipped bool           `json:"skipped"`
+			Reason  string         `json:"reason"`
+			Error   string         `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	byName := map[string]int{}
+	for i, r := range result.Results {
+		byName[r.Plugin.Name] = i
+	}
+	unconfigured := result.Results[byName["ollama"]]
+	if !unconfigured.Skipped || unconfigured.Error != "" || !strings.Contains(unconfigured.Reason, "endpoint_ref is required") {
+		t.Fatalf("unconfigured plugin = %#v, want skipped with reason", unconfigured)
+	}
+	broken := result.Results[byName["slack"]]
+	if broken.Skipped || !strings.Contains(broken.Error, "boom") {
+		t.Fatalf("real failure must stay an error: %#v", broken)
+	}
+}
+
+type lookupFanoutFakeBackend struct {
+	*fakeBackend
+}
+
+func (b *lookupFanoutFakeBackend) ListPlugins(context.Context, management.ListRequest) ([]management.Plugin, error) {
+	return []management.Plugin{
+		{Ref: management.Ref{Name: "ollama"}, Installed: true, Enabled: true},
+		{Ref: management.Ref{Name: "slack"}, Installed: true, Enabled: true},
+	}, nil
+}
+
+func (b *lookupFanoutFakeBackend) ListDatasources(_ context.Context, req management.DatasourceListRequest) (management.DatasourceListResult, error) {
+	return management.DatasourceListResult{Datasources: []sdkmanifest.DatasourceSpec{{
+		Name:         req.Ref.Name + ".items",
+		Entity:       req.Ref.Name + ".item",
+		Capabilities: []string{"lookup"},
+	}}}, nil
+}
+
+func (b *lookupFanoutFakeBackend) CallDatasource(_ context.Context, req management.DatasourceCallRequest) (management.DatasourceCallResult, error) {
+	switch req.Ref.Name {
+	case "ollama":
+		return management.DatasourceCallResult{}, fmt.Errorf("invoke datasources.lookup on plugin %q: endpoint_ref is required", req.Ref.Name)
+	default:
+		return management.DatasourceCallResult{}, fmt.Errorf("boom")
 	}
 }

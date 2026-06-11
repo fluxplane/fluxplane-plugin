@@ -938,7 +938,7 @@ func (b *Backend) AuthMethods(ctx context.Context, req management.AuthMethodsReq
 }
 
 // AuthStatus returns stored auth state for a plugin instance.
-func (b *Backend) AuthStatus(_ context.Context, req management.AuthStatusRequest) (management.AuthStatusResult, error) {
+func (b *Backend) AuthStatus(ctx context.Context, req management.AuthStatusRequest) (management.AuthStatusResult, error) {
 	if err := validateRef(req.Ref); err != nil {
 		return management.AuthStatusResult{}, err
 	}
@@ -947,8 +947,61 @@ func (b *Backend) AuthStatus(_ context.Context, req management.AuthStatusRequest
 		return management.AuthStatusResult{}, err
 	}
 	instance := b.instance(st, req.Ref, normalizeInstance(req.Instance))
-	return management.AuthStatusResult{Plugin: req.Ref, Instance: instance.Name, Auth: append([]management.AuthState(nil), instance.Auth...)}, nil
+	result := management.AuthStatusResult{Plugin: req.Ref, Instance: instance.Name, Auth: append([]management.AuthState(nil), instance.Auth...)}
+	for _, state := range result.Auth {
+		if state.Connected {
+			result.Connected = true
+		}
+	}
+	// Enrich with per-method readiness from the manifest + secret store so
+	// `auth status` answers "what is configured and what is missing" even
+	// before any connect was recorded.
+	if _, plugin, ok := lookupStoredPlugin(st, req.Ref); ok {
+		if manifest, err := b.manifestForPlugin(ctx, plugin, instance.Name); err == nil {
+			configuredMetadata := map[string]bool{}
+			for _, state := range instance.Auth {
+				for key := range state.Metadata {
+					configuredMetadata[strings.TrimSuffix(key, "_ref")] = true
+				}
+			}
+			for _, method := range manifest.Auth {
+				status := management.AuthMethodStatus{Method: method.Name, Kind: string(method.Kind)}
+				missingRequired := false
+				for _, field := range method.Fields {
+					name := strings.TrimSpace(field.Name)
+					if name == "" {
+						continue
+					}
+					configured := configuredMetadata[name]
+					if !configured {
+						ref := sharedsecret.Plugin(req.Ref.Name, instance.Name, sharedsecret.Slot(name))
+						if _, ok, err := b.secretStore.ResolveSecret(context.Background(), ref); err == nil && ok {
+							configured = true
+						}
+					}
+					status.Fields = append(status.Fields, management.AuthFieldStatus{
+						Name:       name,
+						Required:   field.Required,
+						Secret:     field.Secret || field.Sensitive,
+						Configured: configured,
+						Env:        append([]string(nil), field.Env...),
+					})
+					if field.Required && !configured {
+						status.Missing = append(status.Missing, name)
+						missingRequired = true
+					}
+				}
+				status.Ready = !missingRequired
+				result.Methods = append(result.Methods, status)
+				if status.Ready {
+					result.Ready = true
+				}
+			}
+		}
+	}
+	return result, nil
 }
+
 
 // AuthConnect asks the plugin runtime to connect auth and records successful state.
 func (b *Backend) AuthConnect(ctx context.Context, req management.AuthConnectRequest) (management.AuthResult, error) {
@@ -1015,7 +1068,9 @@ func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) 
 	}
 	methods, err := b.AuthMethods(ctx, management.AuthMethodsRequest{Ref: req.Ref, Instance: req.Instance})
 	if err != nil {
-		return management.AuthAutoResult{}, err
+		// Env ingestion only needs the declared auth fields; fall back to the
+		// stored manifest when the plugin runtime cannot be invoked.
+		methods = management.AuthMethodsResult{Plugin: req.Ref, Methods: manifest.Auth}
 	}
 	instance := normalizeInstance(req.Instance)
 	result := management.AuthAutoResult{Plugin: req.Ref, Instance: instance}
@@ -1043,8 +1098,15 @@ func (b *Backend) AuthAuto(ctx context.Context, req management.AuthAutoRequest) 
 	endpoints := authEndpointsFromEnv(manifest, req.Ref.Name, instance)
 	result.Endpoints = endpoints
 	if len(metadataByMethod) == 0 && len(endpoints) == 0 {
-		if req.DryRun {
+		switch {
+		case req.DryRun:
 			result.Message = "dry run"
+		case len(result.Missing) == 0:
+			// Benign no-op: every declared env hint is unset and nothing
+			// required is missing (all-optional methods). Success, not failure.
+			result.Message = "nothing to connect: no declared environment hints are set and no required fields are missing"
+		default:
+			result.Message = "no declared environment hints are set; required fields missing: " + strings.Join(result.Missing, ", ")
 		}
 		return result, nil
 	}

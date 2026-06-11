@@ -84,7 +84,10 @@ func New(opts Options) *cobra.Command {
 		newRollbackCommand(opts.Backend),
 		newProcessCommand(opts.Backend),
 		newDescribeCommand(opts.Backend),
+		newVersionCommand(),
 	)
+	// --version support on the root command.
+	cmd.Version = cliVersionInfo().Version
 	wirePluginNameCompletion(cmd, opts.Backend)
 	return cmd
 }
@@ -841,9 +844,10 @@ func newOperationCommand(backend management.Backend) *cobra.Command {
 
 func newOperationListCommand(backend management.Backend) *cobra.Command {
 	var instance string
+	var namesOnly bool
 	cmd := &cobra.Command{
 		Use:   "list PLUGIN[@VERSION]",
-		Short: "List plugin operations",
+		Short: "List plugin operations (--names for a compact summary without schemas)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := backendRequired(backend); err != nil {
@@ -853,11 +857,43 @@ func newOperationListCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			if !namesOnly {
+				return printJSON(cmd.OutOrStdout(), result)
+			}
+			type operationSummary struct {
+				Name        string `json:"name"`
+				Description string `json:"description,omitempty"`
+				ReadOnly    bool   `json:"read_only,omitempty"`
+			}
+			out := struct {
+				Plugin     management.Ref     `json:"plugin"`
+				Instance   string             `json:"instance,omitempty"`
+				Operations []operationSummary `json:"operations"`
+				Count      int                `json:"count"`
+			}{Plugin: result.Plugin, Instance: result.Instance}
+			for _, op := range result.Operations {
+				out.Operations = append(out.Operations, operationSummary{
+					Name:        op.Name,
+					Description: firstSentence(op.Description),
+					ReadOnly:    op.ReadOnly,
+				})
+			}
+			out.Count = len(out.Operations)
+			return printJSON(cmd.OutOrStdout(), out)
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
+	cmd.Flags().BoolVar(&namesOnly, "names", false, "compact summary: name, first sentence, read_only — no schemas")
 	return cmd
+}
+
+// firstSentence trims a description to its first sentence for compact listings.
+func firstSentence(text string) string {
+	text = strings.TrimSpace(text)
+	if idx := strings.Index(text, ". "); idx > 0 {
+		return text[:idx+1]
+	}
+	return text
 }
 
 func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
@@ -1383,7 +1419,32 @@ type fanoutCallResult struct {
 	Instance string          `json:"instance,omitempty"`
 	Result   json.RawMessage `json:"result,omitempty"`
 	Hint     string          `json:"hint,omitempty"`
+	Skipped  bool            `json:"skipped,omitempty"`
+	Reason   string          `json:"reason,omitempty"`
 	Error    string          `json:"error,omitempty"`
+}
+
+// classifyFanoutFailure distinguishes "this plugin needs setup before it can
+// participate" (missing endpoint ref, unconnected auth) from a real failure,
+// so unconfigured plugins surface as skipped instead of erroring in the
+// middle of an otherwise useful fan-out.
+func classifyFanoutFailure(message string) (skipped bool) {
+	lowered := strings.ToLower(message)
+	for _, marker := range []string{
+		"endpoint_ref is required",
+		"endpoint ref is required",
+		"is not connected",
+		"not_connected",
+		"no registered endpoint",
+		"endpoint is not stored",
+		"endpoint has no url",
+		"auth connect",
+	} {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func fanoutDatasource(ctx context.Context, backend management.Backend, capability, instance string, payload map[string]any) ([]fanoutCallResult, error) {
@@ -1401,7 +1462,12 @@ func fanoutDatasource(ctx context.Context, backend management.Backend, capabilit
 		call, err := backend.CallDatasource(ctx, management.DatasourceCallRequest{Ref: plugin.Ref, Instance: instance, Capability: capability, Input: raw})
 		result := fanoutCallResult{Plugin: plugin.Ref, Instance: instance}
 		if err != nil {
-			result.Error = err.Error()
+			if classifyFanoutFailure(err.Error()) {
+				result.Skipped = true
+				result.Reason = "not configured: " + err.Error()
+			} else {
+				result.Error = err.Error()
+			}
 		} else {
 			result.Result = copyRaw(call.Result)
 			result.Hint = call.Hint
@@ -1599,7 +1665,7 @@ func newEndpointListCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			return printJSON(cmd.OutOrStdout(), redactEndpointListResult(result))
 		},
 	}
 	cmd.Flags().StringVar(&product, "product", "", "filter by product")
@@ -1619,7 +1685,7 @@ func newEndpointGetCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			return printJSON(cmd.OutOrStdout(), redactEndpointGetResult(result))
 		},
 	}
 	return cmd
@@ -1673,7 +1739,7 @@ func newEndpointSaveCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			return printJSON(cmd.OutOrStdout(), redactEndpointSaveResult(result))
 		},
 	}
 	cmd.Flags().StringVar(&product, "product", "", "endpoint product")
@@ -2261,20 +2327,6 @@ func defaultEndpointPort(scheme string) string {
 		return "5432"
 	}
 	return ""
-}
-
-func redactEndpointURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.User == nil {
-		return rawURL
-	}
-	username := parsed.User.Username()
-	if _, ok := parsed.User.Password(); ok {
-		parsed.User = url.UserPassword(username, "xxxxx")
-	} else {
-		parsed.User = url.User(username)
-	}
-	return parsed.String()
 }
 
 func newRunCommand(backend management.Backend) *cobra.Command {

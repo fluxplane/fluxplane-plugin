@@ -253,11 +253,40 @@ type AuthStatusRequest struct {
 	Instance string `json:"instance,omitempty"`
 }
 
-// AuthStatusResult contains auth state for a plugin instance.
+// AuthFieldStatus describes one auth field's configuration state.
+type AuthFieldStatus struct {
+	Name       string   `json:"name"`
+	Required   bool     `json:"required"`
+	Secret     bool     `json:"secret,omitempty"`
+	Configured bool     `json:"configured"`
+	Env        []string `json:"env,omitempty"`
+}
+
+// AuthMethodStatus summarizes one manifest auth method's readiness: which
+// fields exist, which are configured (persisted secret or recorded
+// metadata), and which required ones are missing. Ready means every required
+// field is configured — vacuously true for methods whose fields are all
+// optional.
+type AuthMethodStatus struct {
+	Method  string            `json:"method"`
+	Kind    string            `json:"kind,omitempty"`
+	Ready   bool              `json:"ready"`
+	Fields  []AuthFieldStatus `json:"fields,omitempty"`
+	Missing []string          `json:"missing,omitempty"`
+}
+
+// AuthStatusResult contains recorded auth states plus per-method readiness
+// derived from the manifest and the persisted secret store. Connected reports
+// whether any auth state was successfully recorded (connect or test); Ready
+// reports whether some method has all required fields configured (true for
+// all-optional methods even before any connect).
 type AuthStatusResult struct {
-	Plugin   Ref         `json:"plugin"`
-	Instance string      `json:"instance"`
-	Auth     []AuthState `json:"auth,omitempty"`
+	Plugin    Ref                `json:"plugin"`
+	Instance  string             `json:"instance"`
+	Connected bool               `json:"connected"`
+	Ready     bool               `json:"ready"`
+	Methods   []AuthMethodStatus `json:"methods,omitempty"`
+	Auth      []AuthState        `json:"auth,omitempty"`
 }
 
 // AuthMethodsRequest requests auth methods from the plugin runtime.

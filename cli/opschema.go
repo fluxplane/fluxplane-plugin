@@ -239,11 +239,37 @@ func sampleInputJSON(schema operationInputSchema) string {
 	for _, field := range schema.Required {
 		obj[field] = samplePlaceholder(schemaFieldType(schema.Properties[field]))
 	}
-	// Many operations resolve a target instance from endpoint_ref even when the
-	// advertised schema does not mark it required; surface it so examples work.
-	if _, ok := schema.Properties["endpoint_ref"]; ok {
-		if _, set := obj["endpoint_ref"]; !set {
-			obj["endpoint_ref"] = "<endpoint_ref>"
+	// Nothing required and no declared example: surface a few representative
+	// optional fields so the example shows the real input shape. endpoint_ref
+	// is deliberately NOT auto-injected — when omitted, the backend resolves
+	// the instance's wired endpoint, and an endpoint_ref-only stub hides the
+	// fields that actually matter.
+	if len(obj) == 0 {
+		for _, key := range []string{"ref", "id", "query", "name", "channel", "path", "project", "url", "group"} {
+			property, ok := schema.Properties[key]
+			if !ok {
+				continue
+			}
+			obj[key] = samplePlaceholder(schemaFieldType(property))
+			if len(obj) >= 2 {
+				break
+			}
+		}
+	}
+	if len(obj) == 0 {
+		names := make([]string, 0, len(schema.Properties))
+		for name := range schema.Properties {
+			if name == "endpoint_ref" {
+				continue
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			obj[name] = samplePlaceholder(schemaFieldType(schema.Properties[name]))
+			if len(obj) >= 2 {
+				break
+			}
 		}
 	}
 	return compactJSON(obj)

@@ -1345,3 +1345,128 @@ func TestBackendListProcessesFiltersByPlugin(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthStatusReportsMethodReadiness(t *testing.T) {
+	dir := t.TempDir()
+	backend, err := New(WithPath(filepath.Join(dir, "plugins.json")), WithSecretStore(sharedsecret.NewFileStore(filepath.Join(dir, "secrets"))), WithMarketplace(sdkmanifest.Marketplace{Version: "1"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	manifest := []byte(`{"name":"lokitest","auth":[{"name":"tenant","kind":"config","fields":[
+		{"name":"tenant_id","required":false,"env":["LOKI_TENANT_ID"]}
+	]},{"name":"token","kind":"bearer","fields":[
+		{"name":"access_token","required":true,"secret":true,"env":["LOKITEST_TOKEN"]}
+	]}]}`)
+	if _, err := backend.InstallPlugin(ctx, management.InstallRequest{
+		Ref:      management.Ref{Name: "lokitest"},
+		Source:   "test",
+		Runtime:  management.RuntimeSpec{Kind: "stdio", Command: "lokitest"},
+		Manifest: manifest,
+	}); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	status, err := backend.AuthStatus(ctx, management.AuthStatusRequest{Ref: management.Ref{Name: "lokitest"}})
+	if err != nil {
+		t.Fatalf("AuthStatus: %v", err)
+	}
+	if status.Connected {
+		t.Fatalf("connected = true before any connect: %#v", status)
+	}
+	// The all-optional method makes the plugin ready even unconfigured.
+	if !status.Ready || len(status.Methods) != 2 {
+		t.Fatalf("status = %#v, want ready with two methods", status)
+	}
+	byName := map[string]management.AuthMethodStatus{}
+	for _, method := range status.Methods {
+		byName[method.Method] = method
+	}
+	if tenant := byName["tenant"]; !tenant.Ready || tenant.Fields[0].Configured || tenant.Fields[0].Required {
+		t.Fatalf("tenant method = %#v, want ready with unconfigured optional field", tenant)
+	}
+	token := byName["token"]
+	if token.Ready || len(token.Missing) != 1 || token.Missing[0] != "access_token" {
+		t.Fatalf("token method = %#v, want missing access_token", token)
+	}
+	if !token.Fields[0].Secret || token.Fields[0].Env[0] != "LOKITEST_TOKEN" {
+		t.Fatalf("token field = %#v", token.Fields[0])
+	}
+
+	// Persisting the secret flips configured/ready (connected stays false
+	// until a connect/test is recorded — covered by TestBackendAuthState).
+	store := sharedsecret.NewFileStore(filepath.Join(dir, "secrets"))
+	if err := store.SaveSecret(ctx, sharedsecret.StoredSecret{
+		Ref:   sharedsecret.Plugin("lokitest", "default", "access_token"),
+		Kind:  sharedsecret.KindBearerToken,
+		Value: "tok-123",
+	}); err != nil {
+		t.Fatalf("SaveSecret: %v", err)
+	}
+	status, err = backend.AuthStatus(ctx, management.AuthStatusRequest{Ref: management.Ref{Name: "lokitest"}})
+	if err != nil {
+		t.Fatalf("AuthStatus after seeding secret: %v", err)
+	}
+	if status.Connected {
+		t.Fatalf("status = %#v, want not connected without recorded auth state", status)
+	}
+	for _, method := range status.Methods {
+		if method.Method == "token" && (!method.Ready || !method.Fields[0].Configured || len(method.Missing) != 0) {
+			t.Fatalf("token method after seeding = %#v", method)
+		}
+	}
+}
+
+func TestAuthAutoAllOptionalIsBenignNoOp(t *testing.T) {
+	dir := t.TempDir()
+	backend, err := New(WithPath(filepath.Join(dir, "plugins.json")), WithSecretStore(sharedsecret.NewFileStore(filepath.Join(dir, "secrets"))), WithMarketplace(sdkmanifest.Marketplace{Version: "1"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	manifest := []byte(`{"name":"opttest","auth":[{"name":"tenant","kind":"config","fields":[
+		{"name":"tenant_id","required":false,"env":["OPTTEST_TENANT"]}
+	]}]}`)
+	if _, err := backend.InstallPlugin(ctx, management.InstallRequest{
+		Ref:      management.Ref{Name: "opttest"},
+		Source:   "test",
+		Runtime:  management.RuntimeSpec{Kind: "stdio", Command: "opttest"},
+		Manifest: manifest,
+	}); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	result, err := backend.AuthAuto(ctx, management.AuthAutoRequest{Ref: management.Ref{Name: "opttest"}})
+	if err != nil {
+		t.Fatalf("AuthAuto must not error on a benign no-op: %v", err)
+	}
+	if result.Changed || len(result.Missing) != 0 || len(result.Skipped) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(result.Message, "nothing to connect") {
+		t.Fatalf("message = %q, want benign no-op explanation", result.Message)
+	}
+}
+
+func TestIndexRecordScoreSkipsTokenFallbackForURLs(t *testing.T) {
+	record := indexRecord{
+		ID:     "team/babelforce-app",
+		Title:  "babelforce app",
+		Entity: "gitlab.project",
+		Record: []byte(`{"path_with_namespace":"team/babelforce-app"}`),
+	}
+	// A Slack permalink shares the "babelforce" token with the project name —
+	// the token fallback must not produce a match for URL queries.
+	url := "https://babelforce.slack.com/archives/c0123abcd/p1765370000000100"
+	if score, _ := indexRecordScore(record, url); score != 0 {
+		t.Fatalf("score = %d, want 0 for unrelated URL", score)
+	}
+	// Direct URL field hits still match.
+	withURL := record
+	withURL.Record = []byte(`{"web_url":"` + url + `"}`)
+	if score, _ := indexRecordScore(withURL, url); score == 0 {
+		t.Fatal("exact web_url match must still score")
+	}
+	// Non-URL multi-token queries keep the fallback.
+	if score, _ := indexRecordScore(record, "babelforce app"); score == 0 {
+		t.Fatal("token fallback must stay active for plain text")
+	}
+}

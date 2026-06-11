@@ -2,6 +2,44 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.10.0
+
+Field-report fixes from a real incident-debugging session
+(fluxplane-plugins#4).
+
+### Changed
+- **`auth status` is informative.** It now reports `connected` (any recorded
+  connect/test), `ready` (some method has all required fields configured),
+  and per-method field status: required/optional, secret, configured (from
+  the persisted secret store or recorded metadata), and the missing required
+  fields. All-optional methods (e.g. loki's `tenant_id`) read as ready.
+- **`auth connect auto` no-ops are explicit successes.** When no declared
+  env hints are set and nothing required is missing, the result carries a
+  "nothing to connect" message (exit 0); missing required fields are named.
+  Env ingestion now falls back to the stored manifest when the plugin
+  runtime cannot be invoked.
+- **Skill pages no longer claim "needs auth" for all-optional methods** —
+  they read "auth optional" unless a required field is actually missing.
+- **Endpoint credentials are redacted in display output.** `endpoint
+  list`/`get`/`save` and `describe` mask URL userinfo passwords as `xxxxx`
+  (stored values untouched; the host resolves real URLs at invoke time).
+- **Generated invocation examples stop emitting `endpoint_ref`-only stubs.**
+  Without a schema example, samples are built from required fields, then
+  representative fields (`ref`, `id`, `query`, …); `endpoint_ref` is never
+  auto-injected (the backend resolves the wired endpoint when omitted).
+- **Lookup fan-out marks unconfigured plugins as `skipped`** (with a
+  reason) instead of erroring mid-results when a plugin needs an endpoint
+  ref or auth to participate.
+- **URL queries skip the host-index token fallback.** A hostname fragment
+  can no longer make an unrelated record outrank the plugin that owns the
+  URL; direct URL-field hits still match.
+
+### Added
+- **`operation list --names`** — compact summary (name, first sentence,
+  read_only) without dumping every input/output schema.
+- **`version` command and `--version`** — module version, VCS revision,
+  go/os/arch from the binary's build info, for bug reports.
+
 ## v0.9.0
 
 CLI lifecycle polish: version pinning, process visibility, one-stop describe,

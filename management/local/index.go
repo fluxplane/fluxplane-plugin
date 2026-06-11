@@ -881,7 +881,11 @@ func indexRecordScore(record indexRecord, query string) (int, []string) {
 		score = max(score, 100)
 		fields = appendMatchedField(fields, "record")
 	}
-	if score == 0 {
+	// Token-overlap fallback is noise for URL queries: a hostname fragment
+	// matching an unrelated record's name must not outrank the plugin that
+	// actually owns the URL. URLs only match via the direct field comparisons
+	// above (e.g. an exact/contains web_url hit).
+	if score == 0 && !queryLooksLikeURL(query) {
 		termScore, termFields := indexRecordTokenScore(record, query)
 		if termScore > 0 {
 			score = termScore
@@ -889,6 +893,10 @@ func indexRecordScore(record indexRecord, query string) (int, []string) {
 		}
 	}
 	return score, fields
+}
+
+func queryLooksLikeURL(query string) bool {
+	return strings.Contains(strings.TrimSpace(query), "://")
 }
 
 func indexRecordTokenScore(record indexRecord, query string) (int, []string) {

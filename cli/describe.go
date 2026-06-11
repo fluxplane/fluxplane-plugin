@@ -196,7 +196,7 @@ func describePlugin(ctx context.Context, backend management.Backend, ref managem
 				return
 			}
 			for _, record := range endpoints.Records {
-				result.Endpoints = append(result.Endpoints, describeEndpoint{ID: record.ID, URL: record.URL, Product: record.Product})
+				result.Endpoints = append(result.Endpoints, describeEndpoint{ID: record.ID, URL: redactEndpointURL(record.URL), Product: record.Product})
 			}
 		},
 	}
