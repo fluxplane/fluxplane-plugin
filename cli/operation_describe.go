@@ -33,9 +33,13 @@ type operationDescription struct {
 	// tell a paginating operation at a glance. OutputKeys/OutputRaw stay for
 	// backward compatibility and the raw-schema escape hatch.
 	OutputFields []operationOutputFieldSummary `json:"output_fields,omitempty"`
-	Pagination   []string                      `json:"pagination_fields,omitempty"`
-	OutputKeys   []string                      `json:"output_keys,omitempty"`
-	OutputRaw    json.RawMessage               `json:"output_schema,omitempty"`
+	// FieldPathExamples are ready-to-paste --field paths derived from the
+	// output schema, including * projections for arrays of objects — no
+	// guessing at result nesting.
+	FieldPathExamples []string        `json:"field_path_examples,omitempty"`
+	Pagination        []string        `json:"pagination_fields,omitempty"`
+	OutputKeys        []string        `json:"output_keys,omitempty"`
+	OutputRaw         json.RawMessage `json:"output_schema,omitempty"`
 }
 
 func describeOperation(plugin string, op sdkmanifest.OperationSpec) operationDescription {
@@ -57,7 +61,29 @@ func describeOperation(plugin string, op sdkmanifest.OperationSpec) operationDes
 		OutputRaw:   nonEmptyJSON(op.Output),
 	}
 	desc.OutputFields, desc.Pagination = summarizeOperationOutput(op.Output)
+	desc.FieldPathExamples = fieldPathExamples(desc.OutputFields)
 	return desc
+}
+
+// fieldPathExamples renders ready-to-paste --field paths from the output
+// summary: nested objects become dotted paths, arrays of objects become *
+// projections (items.*.name).
+func fieldPathExamples(fields []operationOutputFieldSummary) []string {
+	var out []string
+	for _, field := range fields {
+		switch {
+		case field.Type == "array" && len(field.Fields) > 0:
+			out = append(out, field.Name+".*."+field.Fields[0].Name)
+		case len(field.Fields) > 0:
+			out = append(out, field.Name+"."+field.Fields[0].Name)
+		default:
+			out = append(out, field.Name)
+		}
+		if len(out) >= 6 {
+			break
+		}
+	}
+	return out
 }
 
 func newOperationDescribeCommand(backend management.Backend) *cobra.Command {

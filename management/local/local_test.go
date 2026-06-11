@@ -1634,3 +1634,28 @@ func TestGetEndpointSelfHealsStaleStateKey(t *testing.T) {
 		t.Fatalf("stale key survived self-heal: %s", healed)
 	}
 }
+
+func TestBlobPutStoresLocalContent(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	blob, err := backend.BlobPut("slack", "", sdkhost.BlobWriteRequest{
+		Content:   []byte("png-bytes"),
+		Filename:  "shot.png",
+		MediaType: "image/png",
+	})
+	if err != nil {
+		t.Fatalf("BlobPut: %v", err)
+	}
+	if blob.Ref == "" || !strings.HasSuffix(blob.Path, ".png") {
+		t.Fatalf("blob = %#v", blob)
+	}
+	content, err := os.ReadFile(blob.Path)
+	if err != nil || string(content) != "png-bytes" {
+		t.Fatalf("stored content = %q, %v", content, err)
+	}
+	if _, err := backend.BlobPut("", "", sdkhost.BlobWriteRequest{Content: []byte("x")}); err == nil {
+		t.Fatalf("plugin must be required")
+	}
+}

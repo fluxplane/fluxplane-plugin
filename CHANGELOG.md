@@ -2,6 +2,27 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.14.0
+
+Field-report fixes (fluxplane-plugins#8).
+
+### Added
+- **`blob put PLUGIN FILE`** stores a local file in a plugin's blob store and
+  prints its `blob_ref` — the sanctioned way to feed large payloads (file
+  uploads) to operations without inlining base64 `content_bytes`, which can
+  exceed the OS argv limit.
+- **`--field` array projection**: `*` maps the remaining path over array
+  elements (`streams.*.packets`, `items.*.name`), so array-shaped results no
+  longer require piping `--result-only` into an external JSON tool.
+- **`operation describe` prints `field_path_examples`** — ready-to-paste
+  `--field` paths derived from the output schema (nested objects as dotted
+  paths, arrays of objects as `*` projections), ending the result-nesting
+  guessing game.
+
+### Changed
+- The skill cheat sheet documents `--input-file payload.json` / `--input -`
+  for payloads that exceed the argv limit, and the `blob put` upload flow.
+
 ## v0.13.1
 
 ### Fixed

@@ -32,6 +32,25 @@ func TestExtractPath(t *testing.T) {
 	}
 }
 
+func TestExtractPathProjectsArrays(t *testing.T) {
+	var v any
+	_ = json.Unmarshal([]byte(`{"streams":[{"dir":"up","packets":10},{"dir":"down","packets":0},{"other":true}]}`), &v)
+
+	got, ok := extractPath(v, "streams.*.packets")
+	if !ok {
+		t.Fatalf("projection missed")
+	}
+	values, isSlice := got.([]any)
+	// Elements missing the path are skipped, not nulled.
+	if !isSlice || len(values) != 2 || values[0] != float64(10) || values[1] != float64(0) {
+		t.Fatalf("projection = %#v", got)
+	}
+	// * on a non-array misses cleanly.
+	if _, ok := extractPath(v, "streams.0.dir.*"); ok {
+		t.Fatalf("* on scalar should miss")
+	}
+}
+
 func outputBackend() *fakeBackend {
 	return &fakeBackend{invokeFn: func(req management.OperationInvokeRequest) (management.OperationInvokeResult, error) {
 		return management.OperationInvokeResult{

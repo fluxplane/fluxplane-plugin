@@ -12,29 +12,46 @@ import (
 
 // extractPath walks a decoded JSON value (map[string]any / []any / scalar)
 // following dot-separated segments. A numeric segment indexes into an array
-// (e.g. "items.0.key"). Returns (value, true) on a clean hit, (nil, false) if any
-// segment misses. Keys containing a literal dot are not addressable.
+// (e.g. "items.0.key") and "*" maps the remaining path over every array
+// element (e.g. "items.*.name" yields the names). Returns (value, true) on a
+// clean hit, (nil, false) if any segment misses. Keys containing a literal dot
+// are not addressable.
 func extractPath(v any, path string) (any, bool) {
-	cur := v
-	for _, seg := range strings.Split(path, ".") {
-		switch node := cur.(type) {
-		case map[string]any:
-			next, ok := node[seg]
-			if !ok {
-				return nil, false
-			}
-			cur = next
-		case []any:
-			idx, err := strconv.Atoi(seg)
-			if err != nil || idx < 0 || idx >= len(node) {
-				return nil, false
-			}
-			cur = node[idx]
-		default:
+	return extractSegments(v, strings.Split(path, "."))
+}
+
+func extractSegments(v any, segments []string) (any, bool) {
+	if len(segments) == 0 {
+		return v, true
+	}
+	seg := segments[0]
+	switch node := v.(type) {
+	case map[string]any:
+		next, ok := node[seg]
+		if !ok {
 			return nil, false
 		}
+		return extractSegments(next, segments[1:])
+	case []any:
+		if seg == "*" {
+			// Projection: collect the remaining path from each element,
+			// skipping elements where it misses.
+			out := make([]any, 0, len(node))
+			for _, item := range node {
+				if value, ok := extractSegments(item, segments[1:]); ok {
+					out = append(out, value)
+				}
+			}
+			return out, true
+		}
+		idx, err := strconv.Atoi(seg)
+		if err != nil || idx < 0 || idx >= len(node) {
+			return nil, false
+		}
+		return extractSegments(node[idx], segments[1:])
+	default:
+		return nil, false
 	}
-	return cur, true
 }
 
 // printOperationResultStrict renders an invoke result honoring the output flags

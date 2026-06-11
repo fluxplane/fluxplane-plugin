@@ -84,6 +84,7 @@ func New(opts Options) *cobra.Command {
 		newUnpinCommand(opts.Backend),
 		newRollbackCommand(opts.Backend),
 		newProcessCommand(opts.Backend),
+		newBlobCommand(opts.Backend),
 		newDescribeCommand(opts.Backend),
 		newVersionCommand(),
 	)
@@ -999,7 +1000,7 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate input locally and report; do not call the backend")
 	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation")
 	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
-	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result (e.g. key,issue.fields.status.name)")
+	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result; * maps over arrays (e.g. key,issue.fields.status.name,items.*.name)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero when a --field path is missing")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the invocation after this duration (e.g. 30s); 0 uses the backend default")
 	cmd.ValidArgsFunction = operationNameCompletion(backend)

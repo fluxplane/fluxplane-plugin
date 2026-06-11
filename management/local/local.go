@@ -1975,6 +1975,26 @@ func (h cliHost) blobRead(payload any) (json.RawMessage, error) {
 	return json.Marshal(sdkhost.BlobReadResponse{Blob: blob, Content: content, Truncated: truncated})
 }
 
+// BlobPut stores content in a plugin instance's blob store so operation inputs
+// can reference it as blob_ref instead of inlining content_bytes (large inline
+// payloads exceed the OS argv limit).
+func (b *Backend) BlobPut(plugin, instance string, req sdkhost.BlobWriteRequest) (sdkhost.BlobRef, error) {
+	plugin = strings.TrimSpace(plugin)
+	if plugin == "" {
+		return sdkhost.BlobRef{}, errors.New("fluxplane-plugin: plugin is required")
+	}
+	host := cliHost{backend: b, plugin: plugin, instance: normalizeInstance(instance)}
+	raw, err := host.blobWrite(req)
+	if err != nil {
+		return sdkhost.BlobRef{}, err
+	}
+	var blob sdkhost.BlobRef
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		return sdkhost.BlobRef{}, err
+	}
+	return blob, nil
+}
+
 func (h cliHost) blobWrite(payload any) (json.RawMessage, error) {
 	var req sdkhost.BlobWriteRequest
 	if err := decodeHostPayload(payload, &req); err != nil {

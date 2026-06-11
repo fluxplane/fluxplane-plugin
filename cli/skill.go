@@ -742,7 +742,8 @@ const skillCheatSheet = `## Core commands
 - {{code "fluxplane-plugin operation list <plugin>"}} — operations a plugin exposes (with input schema).
 - {{code "fluxplane-plugin operation search <query>"}} — find an operation across installed plugins by keyword.
 - {{code "fluxplane-plugin operation describe <plugin> <operation>"}} — one operation's input fields, types, enums, a runnable example, and risk/auth (read this before invoking).
-- {{code "fluxplane-plugin operation invoke <plugin> <operation> --input {...}"}} — call an operation; input is a JSON object. Add {{code "--dry-run"}} to validate input locally first, {{code "--result-only"}} or {{code "--field <dot.path>"}} to trim the output.
+- {{code "fluxplane-plugin operation invoke <plugin> <operation> --input {...}"}} — call an operation; input is a JSON object. Add {{code "--dry-run"}} to validate input locally first, {{code "--result-only"}} or {{code "--field <dot.path>"}} to trim the output ({{code "*"}} maps over arrays, e.g. {{code "items.*.name"}}). Large payloads exceed the OS argv limit — pass {{code "--input-file payload.json"}} or pipe with {{code "--input -"}} instead of inlining.
+- {{code "fluxplane-plugin blob put <plugin> <file>"}} — store a local file in a plugin's blob store and reference it as {{code "blob_ref"}} in inputs (the way to upload files without inlining base64).
 - {{code "fluxplane-plugin datasource search-all <query>"}} — search every searchable datasource at once.
 - {{code "fluxplane-plugin lookup <text-or-url>"}} — resolve a URL or name to a canonical record.
 - {{code "fluxplane-plugin context build-all <query>"}} — gather context from context providers.
