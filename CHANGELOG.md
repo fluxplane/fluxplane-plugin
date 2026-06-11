@@ -2,6 +2,15 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.16.1
+
+### Fixed
+- `monitor connect` registers ingress-style discovery candidates (an
+  externally reachable URL, no in-cluster service/port — e.g. the shared
+  infra Grafana behind its ingress) directly as endpoints instead of
+  failing with "lacks a service name or port". No port-forward is started
+  for them.
+
 ## v0.16.0
 
 Incident-troubleshooter stack (with fluxplane-plugins alertmanager/v0.1.0,

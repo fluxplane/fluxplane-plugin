@@ -112,6 +112,25 @@ func connectMonitorProduct(ctx context.Context, backend management.Backend, inst
 	candidateNamespace := firstNonEmptyString(candidate.Labels["namespace"], namespace)
 	remotePort := portFromURL(candidate.URL)
 	if service == "" || remotePort == 0 {
+		// Ingress-style candidates carry an externally reachable URL instead
+		// of a service+port — register it directly, no forward needed.
+		if external := strings.TrimSpace(candidate.URL); strings.HasPrefix(external, "http") && !strings.Contains(external, ".svc") {
+			saved, err := backend.SaveEndpoint(ctx, management.EndpointSaveRequest{Endpoint: fpendpoint.EndpointRef{
+				ID:          product + "-" + alias,
+				URL:         external,
+				Product:     product,
+				Protocol:    "http",
+				Source:      "monitor-connect",
+				Annotations: map[string]string{"context": contextName, "via": "ingress"},
+			}})
+			if err != nil {
+				entry.Error = err.Error()
+				return entry
+			}
+			entry.EndpointID = saved.Endpoint.ID
+			entry.URL = external
+			return entry
+		}
 		entry.Error = fmt.Sprintf("candidate %q lacks a service name or port", candidate.URL)
 		return entry
 	}

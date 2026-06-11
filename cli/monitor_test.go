@@ -27,6 +27,10 @@ func (b *monitorFakeBackend) InvokeOperation(_ context.Context, req management.O
 		if product == "grafana" {
 			return management.OperationInvokeResult{Result: json.RawMessage(`{"candidates":[]}`)}, nil
 		}
+		if product == "alertmanager" {
+			// Ingress-style candidate: external URL, no service label.
+			return management.OperationInvokeResult{Result: json.RawMessage(`{"candidates":[{"url":"https://alertmanager.infra.example.com","labels":{}}]}`)}, nil
+		}
 		return management.OperationInvokeResult{Result: json.RawMessage(`{"candidates":[{"url":"http://` + product + `.monitoring.svc:9090","labels":{"service":"` + product + `-main","namespace":"monitoring"}}]}`)}, nil
 	case "kubernetes.portforward.list":
 		// One live forward exists for prometheus-main:9090 — must be reused.
@@ -47,7 +51,7 @@ func TestMonitorConnectWiresProducts(t *testing.T) {
 	backend := &monitorFakeBackend{fakeBackend: &fakeBackend{}}
 	var out bytes.Buffer
 	cmd := New(Options{Backend: backend, Out: &out})
-	cmd.SetArgs([]string{"monitor", "connect", "--context", "arn:aws:eks:eu-central-1:1:cluster/dev-eu-central-1", "--product", "prometheus,loki,grafana"})
+	cmd.SetArgs([]string{"monitor", "connect", "--context", "arn:aws:eks:eu-central-1:1:cluster/dev-eu-central-1", "--product", "prometheus,loki,grafana,alertmanager"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -76,8 +80,13 @@ func TestMonitorConnectWiresProducts(t *testing.T) {
 	if byProduct["grafana"].Skipped == "" || byProduct["grafana"].Error != "" {
 		t.Fatalf("grafana = %#v", byProduct["grafana"])
 	}
+	// Ingress-style candidates register their external URL directly.
+	alertmanager := byProduct["alertmanager"]
+	if alertmanager.URL != "https://alertmanager.infra.example.com" || alertmanager.ForwardID != "" || alertmanager.Error != "" {
+		t.Fatalf("alertmanager = %#v", alertmanager)
+	}
 	// Saved endpoints carry the forward target annotations.
-	if len(backend.saved) != 2 {
+	if len(backend.saved) != 3 {
 		t.Fatalf("saved = %#v", backend.saved)
 	}
 	if backend.saved[0].Annotations["resource"] != "service/prometheus-main" || backend.saved[0].Annotations["remote_port"] != "9090" {
