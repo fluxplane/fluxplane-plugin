@@ -946,3 +946,64 @@ func (b *lookupFanoutFakeBackend) CallDatasource(_ context.Context, req manageme
 		return management.DatasourceCallResult{}, fmt.Errorf("boom")
 	}
 }
+
+func TestEndpointDiscoverFansOutWhenPluginHasNoCandidates(t *testing.T) {
+	backend := &discoverFakeBackend{fakeBackend: &fakeBackend{}}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "discover", "loki", "loki"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var result struct {
+		Fanout []struct {
+			Plugin management.Ref  `json:"plugin"`
+			Result json.RawMessage `json:"result"`
+		} `json:"fanout"`
+		Hint string `json:"hint"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if len(result.Fanout) != 1 || result.Fanout[0].Plugin.Name != "kubernetes" {
+		t.Fatalf("fanout = %#v", result.Fanout)
+	}
+	if !strings.Contains(result.Hint, "discovered by other plugins") {
+		t.Fatalf("hint = %q", result.Hint)
+	}
+	// Direct hits do not fan out.
+	backend.requests = nil
+	out.Reset()
+	cmd = New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"endpoint", "discover", "kubernetes", "loki"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute direct: %v", err)
+	}
+	if strings.Contains(out.String(), "fanout") {
+		t.Fatalf("direct hit must not fan out: %s", out.String())
+	}
+}
+
+type discoverFakeBackend struct {
+	*fakeBackend
+	requests []management.EndpointDiscoverRequest
+}
+
+func (b *discoverFakeBackend) ListPlugins(context.Context, management.ListRequest) ([]management.Plugin, error) {
+	return []management.Plugin{
+		{Ref: management.Ref{Name: "loki"}, Installed: true, Enabled: true},
+		{Ref: management.Ref{Name: "kubernetes"}, Installed: true, Enabled: true},
+		{Ref: management.Ref{Name: "clock"}, Installed: true, Enabled: true},
+	}, nil
+}
+
+func (b *discoverFakeBackend) DiscoverEndpoints(_ context.Context, req management.EndpointDiscoverRequest) (management.EndpointDiscoverResult, error) {
+	b.requests = append(b.requests, req)
+	if req.Ref.Name == "kubernetes" && req.Product == "loki" {
+		return management.EndpointDiscoverResult{
+			Plugin: req.Ref,
+			Result: json.RawMessage(`{"candidates":[{"id":"loki:1","url":"http://loki.monitoring.svc:3100","product":"loki","score":0.99}]}`),
+		}, nil
+	}
+	return management.EndpointDiscoverResult{Plugin: req.Ref, Result: json.RawMessage(`{"candidates":[]}`)}, nil
+}

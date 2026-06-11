@@ -1988,19 +1988,37 @@ func newEndpointDiscoverCommand(backend management.Backend) *cobra.Command {
 			if len(args) > 1 {
 				product = args[1]
 			}
-			result, err := backend.DiscoverEndpoints(cmd.Context(), management.EndpointDiscoverRequest{
-				Ref:       parseRef(args[0]),
+			ref := parseRef(args[0])
+			request := management.EndpointDiscoverRequest{
+				Ref:       ref,
 				Instance:  instance,
 				Product:   product,
 				Context:   contextName,
 				Namespace: namespace,
 				Limit:     limit,
 				Input:     payload,
-			})
-			if err != nil {
-				return err
 			}
-			return printJSON(cmd.OutOrStdout(), result)
+			result, err := backend.DiscoverEndpoints(cmd.Context(), request)
+			out := endpointDiscoverOutput{EndpointDiscoverResult: result}
+			// The plugin owning a product often can't discover its own
+			// endpoints (loki, prometheus, ...) — discovery lives in
+			// infrastructure plugins like kubernetes. When the named plugin
+			// yields nothing, fan out across the other installed plugins for
+			// the same product instead of reporting an empty result.
+			if err != nil || discoverCandidateCount(result.Result) == 0 {
+				fanProduct := strings.TrimSpace(product)
+				if fanProduct == "" {
+					fanProduct = strings.TrimSpace(ref.Name)
+				}
+				request.Product = fanProduct
+				out.Fanout = discoverEndpointsFanout(cmd.Context(), backend, request, ref.Name)
+				if len(out.Fanout) > 0 {
+					out.Hint = fmt.Sprintf("plugin %q returned no candidates; product %q was discovered by other plugins — register one with: fluxplane-plugin endpoint save <id> <url> --product %s", ref.Name, fanProduct, fanProduct)
+				} else if err != nil {
+					return err
+				}
+			}
+			return printJSON(cmd.OutOrStdout(), out)
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")

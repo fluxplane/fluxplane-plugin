@@ -2,6 +2,16 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.11.0
+
+### Changed
+- **`endpoint discover` fans out** (fluxplane-plugins#4 loki/1): when the
+  named plugin returns no candidates (product plugins usually can't discover
+  their own endpoints), the command queries every other installed plugin for
+  the same product — `endpoint discover loki` now surfaces the loki services
+  the kubernetes plugin finds, under `fanout`, with a hint showing how to
+  register one.
+
 ## v0.10.0
 
 Field-report fixes from a real incident-debugging session
