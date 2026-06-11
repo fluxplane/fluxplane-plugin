@@ -101,7 +101,10 @@ type doctorPluginReport struct {
 }
 
 type doctorResult struct {
-	Healthy bool                 `json:"healthy"`
+	Healthy bool `json:"healthy"`
+	// NotOK names the failing plugins so "is everything ok, and if not what"
+	// is a one-liner instead of iterating plugins[] comparing .ok.
+	NotOK   []string             `json:"not_ok,omitempty"`
 	Plugins []doctorPluginReport `json:"plugins"`
 }
 
@@ -146,9 +149,11 @@ func newDoctorCommand(backend management.Backend) *cobra.Command {
 			for _, report := range reports {
 				if !report.OK {
 					result.Healthy = false
+					result.NotOK = append(result.NotOK, report.Plugin.Name)
 				}
 				result.Plugins = append(result.Plugins, report)
 			}
+			sort.Strings(result.NotOK)
 			sort.Slice(result.Plugins, func(i, j int) bool { return result.Plugins[i].Plugin.Name < result.Plugins[j].Plugin.Name })
 			return printJSON(cmd.OutOrStdout(), result)
 		},

@@ -18,12 +18,11 @@ func TestPreferPathBinary(t *testing.T) {
 	pathOnly := sdkmanifest.PluginEntry{Binary: "fluxplane-plugin-jira"}
 	noBinary := sdkmanifest.PluginEntry{GoInstall: "example.com/jira@latest"}
 
-	// Normal install reuses a PATH binary for convenience.
-	if !preferPathBinary(false, withGoInstall) {
-		t.Fatal("normal install should reuse PATH binary")
+	// A declared go_install source always wins — adopting a same-named PATH
+	// binary silently installs stale dev builds (fluxplane-plugins#9).
+	if preferPathBinary(false, withGoInstall) {
+		t.Fatal("install with go_install must not adopt a PATH binary")
 	}
-	// Upgrade (preferRemote) with a go_install source must NOT reuse PATH —
-	// otherwise it silently keeps a stale binary instead of fetching latest.
 	if preferPathBinary(true, withGoInstall) {
 		t.Fatal("upgrade with go_install must not reuse PATH binary")
 	}

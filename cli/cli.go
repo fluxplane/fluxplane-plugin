@@ -1742,6 +1742,8 @@ func newEndpointGetCommand(backend management.Backend) *cobra.Command {
 }
 
 func newEndpointSaveCommand(backend management.Backend) *cobra.Command {
+	var id string
+	var endpointURL string
 	var product string
 	var protocolName string
 	var source string
@@ -1758,6 +1760,14 @@ func newEndpointSaveCommand(backend management.Backend) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := backendRequired(backend); err != nil {
 				return err
+			}
+			// --id/--url are the natural first guess for this command's shape;
+			// accept them as aliases for the positionals.
+			if id != "" {
+				args = append([]string{id}, args...)
+			}
+			if endpointURL != "" {
+				args = append(args, endpointURL)
 			}
 			endpoint, err := endpointSaveInput(args, input, inputFile)
 			if err != nil {
@@ -1792,6 +1802,8 @@ func newEndpointSaveCommand(backend management.Backend) *cobra.Command {
 			return printJSON(cmd.OutOrStdout(), redactEndpointSaveResult(result))
 		},
 	}
+	cmd.Flags().StringVar(&id, "id", "", "endpoint ID (alias for the first positional)")
+	cmd.Flags().StringVar(&endpointURL, "url", "", "endpoint URL (alias for the second positional)")
 	cmd.Flags().StringVar(&product, "product", "", "endpoint product")
 	cmd.Flags().StringVar(&protocolName, "protocol", "", "endpoint protocol")
 	cmd.Flags().StringVar(&source, "source", "", "endpoint source")

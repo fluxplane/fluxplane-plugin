@@ -2,6 +2,30 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.15.0
+
+Dogfood-friction fixes (fluxplane-plugins#9, #10, #11).
+
+### Fixed
+- **Installs no longer adopt PATH binaries when the marketplace declares a
+  `go_install` source** (#9): a stale same-named binary on PATH (e.g. an old
+  dev build in `~/go/bin`) could silently become the plugin runtime on
+  `install`/`update`. PATH reuse is now a fallback for source-less entries
+  only.
+- **Installs resolve `@latest` first, then install the pinned version**
+  (#10): bare `go install pkg@latest` can ride a proxy-cached `@latest` for
+  minutes after a tag push, silently installing the previous release. The
+  backend now resolves the version via `go list -m` (module mode, workspace
+  off, with the source's org appended to `GOPRIVATE`/`GONOSUMDB` so
+  resolution goes direct to the VCS) and installs `pkg@vX.Y.Z` — upgrades
+  right after a release pick up the new tag immediately and deterministically.
+
+### Added
+- `endpoint save` accepts `--id`/`--url` as aliases for the positionals —
+  the natural first guess no longer fails with `unknown flag` (#11).
+- `doctor` reports a top-level `not_ok: [...]` list naming failing plugins,
+  so "is everything ok, and if not what" is a one-liner (#11).
+
 ## v0.14.0
 
 Field-report fixes (fluxplane-plugins#8).

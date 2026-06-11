@@ -3496,9 +3496,18 @@ func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.
 	}
 	if strings.TrimSpace(entry.GoInstall) != "" {
 		spec := strings.TrimSpace(entry.GoInstall)
-		if version != "" {
-			base, _, _ := strings.Cut(spec, "@")
+		base, requested, _ := strings.Cut(spec, "@")
+		switch {
+		case version != "":
 			spec = base + "@" + version
+		case requested == "" || requested == "latest":
+			// Resolve-then-pin: a bare `go install pkg@latest` can ride a
+			// proxy-cached @latest for minutes after a tag push, silently
+			// installing the previous release. Resolving the version first
+			// (direct for the module's org) makes the install deterministic.
+			if resolved := resolveLatestModuleVersion(ctx, base); resolved != "" {
+				spec = base + "@" + resolved
+			}
 		}
 		if err := b.goInstallMarketplaceBinary(ctx, spec); err != nil {
 			return management.RuntimeSpec{}, nil, "", err
@@ -3516,18 +3525,17 @@ func (b *Backend) prepareMarketplaceRuntime(ctx context.Context, ref management.
 }
 
 // preferPathBinary reports whether to resolve a plugin to an existing PATH
-// binary rather than (re)installing it. We reuse a PATH binary for convenience
-// on normal installs, but NOT when forcing remote (upgrade) and a go_install
-// source is available — otherwise `upgrade` would silently reuse a stale binary
-// already on PATH instead of fetching the latest published version.
+// binary rather than installing it. PATH reuse is a fallback for entries with
+// no go_install source only: when the marketplace declares where the plugin is
+// published, adopting whatever binary happens to share its name on PATH
+// silently installs stale dev builds (a months-old +dirty artifact in ~/go/bin
+// once shadowed every install/update of the published plugin).
 func preferPathBinary(preferRemote bool, entry sdkmanifest.PluginEntry) bool {
+	_ = preferRemote
 	if strings.TrimSpace(entry.Binary) == "" {
 		return false
 	}
-	if preferRemote && strings.TrimSpace(entry.GoInstall) != "" {
-		return false
-	}
-	return true
+	return strings.TrimSpace(entry.GoInstall) == ""
 }
 
 func (b *Backend) buildLocalMarketplaceBinary(ctx context.Context, localPath, binary, binPath string) error {
@@ -3559,7 +3567,7 @@ var goInstallBinary = func(ctx context.Context, binDir, source string) error {
 		return fmt.Errorf("fluxplane-plugin: create plugin bin dir: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, "go", "install", strings.TrimSpace(source))
-	cmd.Env = append(os.Environ(), "GOBIN="+binDir)
+	cmd.Env = append(goModuleEnv(source), "GOBIN="+binDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -3570,6 +3578,52 @@ var goInstallBinary = func(ctx context.Context, binDir, source string) error {
 		return fmt.Errorf("fluxplane-plugin: go install marketplace plugin %q: %s", source, msg)
 	}
 	return nil
+}
+
+// resolveLatestModuleVersion resolves the latest published version for a
+// go_install package path by querying `go list -m <prefix>@latest`, walking
+// the path one segment shorter at a time until a module answers (the package
+// usually lives under cmd/ inside the module). Best effort: "" means install
+// with the original @latest spec. Overridable in tests.
+var resolveLatestModuleVersion = func(ctx context.Context, pkgPath string) string {
+	parts := strings.Split(strings.TrimSpace(pkgPath), "/")
+	for i := len(parts); i >= 2; i-- {
+		candidate := strings.Join(parts[:i], "/")
+		cmd := exec.CommandContext(ctx, "go", "list", "-m", "-f", "{{.Version}}", candidate+"@latest")
+		cmd.Env = goModuleEnv(pkgPath)
+		cmd.Dir = os.TempDir() // outside any module or workspace
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		if version := strings.TrimSpace(string(out)); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+// goModuleEnv builds the environment for module-resolving go subprocesses:
+// module mode on, workspace off, and the source's org prefix added to
+// GOPRIVATE/GONOSUMDB so version resolution goes direct to the VCS instead of
+// riding a proxy whose @latest answer can lag a fresh tag by minutes.
+func goModuleEnv(source string) []string {
+	env := append(os.Environ(), "GO111MODULE=on", "GOWORK=off")
+	parts := strings.SplitN(strings.TrimSpace(source), "/", 3)
+	if len(parts) < 2 || !strings.Contains(parts[0], ".") {
+		return env
+	}
+	orgGlob := parts[0] + "/" + parts[1] + "/*"
+	for _, key := range []string{"GOPRIVATE", "GONOSUMDB"} {
+		existing := os.Getenv(key)
+		switch {
+		case existing == "":
+			env = append(env, key+"="+orgGlob)
+		case !strings.Contains(existing, orgGlob):
+			env = append(env, key+"="+existing+","+orgGlob)
+		}
+	}
+	return env
 }
 
 // inspectInstalledModuleVersion reports the module version embedded in a

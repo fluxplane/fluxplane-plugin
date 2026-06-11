@@ -1659,3 +1659,76 @@ func TestBlobPutStoresLocalContent(t *testing.T) {
 		t.Fatalf("plugin must be required")
 	}
 }
+
+func TestInstallPinsResolvedLatestAndIgnoresPathBinary(t *testing.T) {
+	dir := t.TempDir()
+	// A stale same-named binary on PATH must NOT be adopted when the
+	// marketplace declares a go_install source (fluxplane-plugins#9).
+	pathDir := filepath.Join(dir, "pathbin")
+	if err := os.MkdirAll(pathDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale := filepath.Join(pathDir, "fluxplane-plugin-jira")
+	if err := os.WriteFile(stale, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	binDir := filepath.Join(dir, "bin")
+	var installedSpec string
+	origInstall, origResolve, origInspect := goInstallBinary, resolveLatestModuleVersion, inspectInstalledModuleVersion
+	goInstallBinary = func(_ context.Context, binDir, source string) error {
+		installedSpec = source
+		if err := os.MkdirAll(binDir, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(binDir, "fluxplane-plugin-jira"), []byte("bin"), 0o700)
+	}
+	resolveLatestModuleVersion = func(context.Context, string) string { return "v0.9.9" }
+	inspectInstalledModuleVersion = func(context.Context, string) string { return "v0.9.9" }
+	t.Cleanup(func() {
+		goInstallBinary, resolveLatestModuleVersion, inspectInstalledModuleVersion = origInstall, origResolve, origInspect
+	})
+
+	backend, err := New(WithPath(filepath.Join(dir, "plugins.json")), WithBinDir(binDir), WithMarketplace(sdkmanifest.Marketplace{
+		Version: "1",
+		Plugins: []sdkmanifest.PluginEntry{{
+			Name:      "jira",
+			Binary:    "fluxplane-plugin-jira",
+			GoInstall: "example.com/plugins/cmd/fluxplane-plugin-jira@latest",
+		}},
+	}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	install, err := backend.InstallPlugin(context.Background(), management.InstallRequest{Ref: management.Ref{Name: "jira"}})
+	if err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	// @latest was resolved first and the install pinned (fluxplane-plugins#10).
+	if installedSpec != "example.com/plugins/cmd/fluxplane-plugin-jira@v0.9.9" {
+		t.Fatalf("installed spec = %q, want pinned version", installedSpec)
+	}
+	if install.Plugin.Runtime.Command != filepath.Join(binDir, "fluxplane-plugin-jira") {
+		t.Fatalf("runtime = %q, must be the managed bin dir, not the PATH binary", install.Plugin.Runtime.Command)
+	}
+	if install.Plugin.Labels["installed_binary_kind"] != "go_install" || install.Plugin.InstalledVersion != "v0.9.9" {
+		t.Fatalf("labels = %#v version = %q", install.Plugin.Labels, install.Plugin.InstalledVersion)
+	}
+}
+
+func TestGoModuleEnvAddsOrgToPrivate(t *testing.T) {
+	t.Setenv("GOPRIVATE", "github.com/other/*")
+	t.Setenv("GONOSUMDB", "")
+	env := goModuleEnv("github.com/fluxplane/fluxplane-plugins/gitlab/cmd/x@latest")
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "GOPRIVATE=github.com/other/*,github.com/fluxplane/*") {
+		t.Fatalf("GOPRIVATE not extended: %s", joined)
+	}
+	if !strings.Contains(joined, "GONOSUMDB=github.com/fluxplane/*") {
+		t.Fatalf("GONOSUMDB not set: %s", joined)
+	}
+	if !strings.Contains(joined, "GO111MODULE=on") || !strings.Contains(joined, "GOWORK=off") {
+		t.Fatalf("module mode env missing: %s", joined)
+	}
+}
