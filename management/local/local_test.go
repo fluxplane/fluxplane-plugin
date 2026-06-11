@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1505,6 +1506,39 @@ func TestBlobWritePreservesFilenameInPath(t *testing.T) {
 	}
 	if !strings.HasSuffix(blob.Path, ".bin") {
 		t.Fatalf("explicit-ref path = %q, want .bin", blob.Path)
+	}
+}
+
+func TestResolveHTTPAuthBasicFromStoredSecrets(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir()+"/plugins.json"), WithSecretStore(sharedsecret.NewFileStore(t.TempDir())))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	for purpose, value := range map[string]string{"basic_username": "loki", "basic_password": "s3cr3t"} {
+		ref := sharedsecret.Plugin("loki", "default", sharedsecret.Slot(purpose))
+		if err := backend.secretStore.SaveSecret(ctx, sharedsecret.StoredSecret{Ref: ref, Value: value}); err != nil {
+			t.Fatalf("SaveSecret: %v", err)
+		}
+	}
+	host := cliHost{backend: backend, plugin: "loki", instance: "default"}
+	headers, err := host.resolveHTTPAuth(nil, &sdkhost.HTTPAuthRequest{UsernamePurpose: "basic_username", PasswordPurpose: "basic_password"})
+	if err != nil {
+		t.Fatalf("resolveHTTPAuth: %v", err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("loki:s3cr3t"))
+	if headers["Authorization"] != want {
+		t.Fatalf("Authorization = %q, want %q", headers["Authorization"], want)
+	}
+	// With no stored secrets the header stays absent — optional basic auth
+	// must not break unauthenticated endpoints.
+	bare := cliHost{backend: backend, plugin: "other", instance: "default"}
+	headers, err = bare.resolveHTTPAuth(nil, &sdkhost.HTTPAuthRequest{UsernamePurpose: "basic_username", PasswordPurpose: "basic_password"})
+	if err != nil {
+		t.Fatalf("resolveHTTPAuth bare: %v", err)
+	}
+	if headers["Authorization"] != "" {
+		t.Fatalf("Authorization = %q, want empty without stored secrets", headers["Authorization"])
 	}
 }
 

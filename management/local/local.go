@@ -4,6 +4,7 @@ package local
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2486,6 +2487,22 @@ func (h cliHost) resolveHTTPAuth(headers map[string]string, auth *sdkhost.HTTPAu
 			} else if ok {
 				out["Authorization"] = "Bearer " + value
 			}
+		}
+	}
+	// HTTP basic auth from stored username/password purposes. Skipped when
+	// neither secret is stored, so plugins can declare optional basic auth
+	// without breaking unauthenticated endpoints.
+	if strings.TrimSpace(out["Authorization"]) == "" && (strings.TrimSpace(auth.UsernamePurpose) != "" || strings.TrimSpace(auth.PasswordPurpose) != "") {
+		username, hasUsername, err := h.resolveSecret(auth.UsernamePurpose)
+		if err != nil {
+			return nil, err
+		}
+		password, hasPassword, err := h.resolveSecret(auth.PasswordPurpose)
+		if err != nil {
+			return nil, err
+		}
+		if hasUsername || hasPassword {
+			out["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
 		}
 	}
 	for header, purpose := range auth.HeaderPurposes {

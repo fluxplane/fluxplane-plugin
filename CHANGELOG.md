@@ -2,6 +2,16 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.13.1
+
+### Fixed
+- The CLI host now honors `HTTPAuthRequest.UsernamePurpose`/`PasswordPurpose`:
+  HTTP basic auth is composed from stored secrets (`Authorization: Basic …`)
+  when either purpose has material, and skipped entirely when neither is
+  stored — plugins can declare optional basic auth (loki) without breaking
+  unauthenticated endpoints. The DTO fields existed but were silently
+  ignored (fluxplane-plugins#5).
+
 ## v0.13.0
 
 Field-report-3 fixes (fluxplane-plugins#6, fluxplane-plugins#7).
