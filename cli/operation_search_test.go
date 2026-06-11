@@ -92,7 +92,7 @@ func TestOperationSearchAcrossPlugins(t *testing.T) {
 	}
 	var out bytes.Buffer
 	cmd := New(Options{Backend: backend, Out: &out})
-	cmd.SetArgs([]string{"operation", "search", "comment", "--json"})
+	cmd.SetArgs([]string{"operation", "search", "comment"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestOperationSearchRanksPartialTermMatches(t *testing.T) {
 	cmd := New(Options{Backend: backend, Out: &out})
 	// The report's exact failing query: only one of three terms appears in
 	// the operation — OR semantics must still surface it, ranked first.
-	cmd.SetArgs([]string{"operation", "search", "thread", "replies", "history", "--json"})
+	cmd.SetArgs([]string{"operation", "search", "thread", "replies", "history"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("search: %v", err)
 	}

@@ -28,9 +28,13 @@ const skillsDirEnv = "FLUXPLANE_PLUGIN_SKILLS_DIR"
 
 // skillData is the template input for the generated agent skill.
 type skillData struct {
-	Name        string            `json:"name"`
-	GeneratedAt string            `json:"generated_at"`
-	Instance    string            `json:"instance"`
+	Name        string `json:"name"`
+	GeneratedAt string `json:"generated_at"`
+	Instance    string `json:"instance"`
+	// StateSource is the state file the generating backend read. Embedded in
+	// the page header so a page produced against a divergent state dir (the
+	// "fresh timestamp, stale plugin list" failure) is self-diagnosing.
+	StateSource string            `json:"state_source,omitempty"`
 	Plugins     []skillPlugin     `json:"plugins"`
 	Available   []availablePlugin `json:"available,omitempty"`
 }
@@ -252,6 +256,9 @@ func buildSkillData(ctx context.Context, backend management.Backend, name, insta
 		Name:        name,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Instance:    instance,
+	}
+	if source, ok := backend.(interface{ StatePath() string }); ok {
+		data.StateSource = strings.TrimSpace(source.StatePath())
 	}
 	installed, err := backend.ListPlugins(ctx, management.ListRequest{All: true})
 	if err != nil {
@@ -782,6 +789,9 @@ Use {{code "fluxplane-plugin"}} for plugin-backed access to engineering systems 
 
 Generated: {{ .GeneratedAt }}
 Instance: {{code .Instance}}
+{{- if .StateSource }}
+State: {{code .StateSource}} ({{ len .Plugins }} installed plugins — if this disagrees with {{code "fluxplane-plugin status"}}, this page was generated against a different state dir; rerun {{code "fluxplane-plugin skill refresh"}})
+{{- end }}
 
 ` + skillCheatSheet + `
 
@@ -862,6 +872,9 @@ Use {{code "fluxplane-plugin"}} for plugin-backed access to engineering systems.
 
 Generated: {{ .GeneratedAt }}
 Instance: {{code .Instance}}
+{{- if .StateSource }}
+State: {{code .StateSource}} ({{ len .Plugins }} installed plugins — if this disagrees with {{code "fluxplane-plugin status"}}, this page was generated against a different state dir; rerun {{code "fluxplane-plugin skill refresh"}})
+{{- end }}
 
 ` + skillCheatSheet + `
 

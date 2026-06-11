@@ -58,18 +58,25 @@ func TestValidateEnumNumberAsFloat(t *testing.T) {
 	}
 }
 
-func TestValidateExamplesSuppressMissingAndUnknown(t *testing.T) {
-	// An op with a one-of shape declares an example; missing-required and unknown
-	// checks must be suppressed, but enum checks still run.
+func TestValidateExamplesSuppressMissingButNotUnknown(t *testing.T) {
+	// An op with a one-of shape declares an example: missing-required must be
+	// suppressed (the flat required list cannot express one-of), but unknown
+	// keys are never valid under additionalProperties:false — a typo'd field
+	// name must be flagged uniformly whether or not examples exist.
 	schema := schemaFromJSON(`{
 		"required":["key","transition_id"],
 		"additionalProperties":false,
 		"properties":{"key":{"type":"string"},"transition_id":{"type":"string"},"mode":{"type":"string","enum":["a","b"]}},
 		"examples":[{"key":"DEV-1","transition_id":"171"}]
 	}`)
-	// missing transition_id + unknown key would normally flag; suppressed here.
-	if p := validateOperationInput(schema, json.RawMessage(`{"key":"DEV-1","other":1}`)); len(p) != 0 {
-		t.Fatalf("examples should suppress missing/unknown: %#v", p)
+	// missing transition_id is suppressed; the unknown key still flags.
+	p := validateOperationInput(schema, json.RawMessage(`{"key":"DEV-1","other":1}`))
+	if len(p) != 1 || p[0].Field != "other" || !strings.Contains(p[0].Reason, "unknown field") {
+		t.Fatalf("want exactly the unknown-field problem: %#v", p)
+	}
+	// missing-required alone stays suppressed under examples.
+	if p := validateOperationInput(schema, json.RawMessage(`{"key":"DEV-1"}`)); len(p) != 0 {
+		t.Fatalf("examples should suppress missing-required: %#v", p)
 	}
 	// enum still enforced
 	if p := validateOperationInput(schema, json.RawMessage(`{"key":"DEV-1","mode":"z"}`)); len(p) != 1 || p[0].Field != "mode" {

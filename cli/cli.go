@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -479,7 +480,11 @@ func newListCommand(backend management.Backend) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), plugins)
+			// Same envelope as `status` ({"plugins": [...]}) so jq written
+			// against one command works on the other.
+			return printJSON(cmd.OutOrStdout(), struct {
+				Plugins []management.Plugin `json:"plugins"`
+			}{Plugins: plugins})
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "include disabled or hidden plugins")
@@ -1235,11 +1240,38 @@ func newLookupCommandWithUse(backend management.Backend, use, short string) *cob
 				return err
 			}
 			text := strings.Join(args, " ")
-			result, err := fanoutDatasource(cmd.Context(), backend, "lookup", instance, map[string]any{"text": text, "entity": entity, "limit": limit})
+			fanout, err := fanoutDatasource(cmd.Context(), backend, "lookup", instance, map[string]any{"text": text, "entity": entity, "limit": limit})
 			if err != nil {
 				return err
 			}
-			return printJSON(cmd.OutOrStdout(), map[string]any{"text": text, "results": result})
+			// Unconfigured plugins are setup noise, not lookup results: list
+			// their names once instead of repeating per-plugin errors. And when
+			// any plugin matched, mute the others' "index not built" hints —
+			// they only matter when the lookup came back empty-handed.
+			results := make([]fanoutCallResult, 0, len(fanout))
+			var skipped []string
+			anyMatches := false
+			for _, r := range fanout {
+				if r.Skipped {
+					skipped = append(skipped, r.Plugin.Name)
+					continue
+				}
+				if lookupResultHasMatches(r.Result) {
+					anyMatches = true
+				}
+				results = append(results, r)
+			}
+			if anyMatches {
+				for i := range results {
+					results[i].Hint = ""
+				}
+			}
+			out := map[string]any{"text": text, "results": results}
+			if len(skipped) > 0 {
+				sort.Strings(skipped)
+				out["skipped_unconfigured"] = skipped
+			}
+			return printJSON(cmd.OutOrStdout(), out)
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
@@ -1436,7 +1468,7 @@ func classifyFanoutFailure(message string) (skipped bool) {
 		"is not connected",
 		"not_connected",
 		"no registered endpoint",
-		"endpoint is not stored",
+		"is not stored", // endpoint "x" is not stored
 		"endpoint has no url",
 		"auth connect",
 	} {
@@ -1445,6 +1477,23 @@ func classifyFanoutFailure(message string) (skipped bool) {
 		}
 	}
 	return false
+}
+
+// lookupResultHasMatches reports whether a datasource lookup payload carries at
+// least one match, so per-plugin "index not built" hints can be muted when the
+// aggregate already found something.
+func lookupResultHasMatches(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var decoded struct {
+		Count   int               `json:"count"`
+		Matches []json.RawMessage `json:"matches"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return false
+	}
+	return decoded.Count > 0 || len(decoded.Matches) > 0
 }
 
 func fanoutDatasource(ctx context.Context, backend management.Backend, capability, instance string, payload map[string]any) ([]fanoutCallResult, error) {
@@ -2178,14 +2227,7 @@ func doctorEndpoints(ctx context.Context, backend management.Backend, instance, 
 }
 
 func endpointRecordsFromList(listed management.EndpointListResult) []fpendpoint.Record {
-	if len(listed.Records) > 0 {
-		return append([]fpendpoint.Record(nil), listed.Records...)
-	}
-	records := make([]fpendpoint.Record, 0, len(listed.Endpoints))
-	for _, endpoint := range listed.Endpoints {
-		records = append(records, fpendpoint.Record{EndpointRef: endpoint})
-	}
-	return records
+	return append([]fpendpoint.Record(nil), listed.Endpoints...)
 }
 
 func testEndpoint(ctx context.Context, backend management.Backend, instance string, endpoint fpendpoint.Record) endpointTestResult {

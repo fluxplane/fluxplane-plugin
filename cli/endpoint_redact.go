@@ -43,10 +43,7 @@ func redactEndpointRecord(record fpendpoint.Record) fpendpoint.Record {
 
 func redactEndpointListResult(result management.EndpointListResult) management.EndpointListResult {
 	for i := range result.Endpoints {
-		result.Endpoints[i] = redactEndpointRef(result.Endpoints[i])
-	}
-	for i := range result.Records {
-		result.Records[i] = redactEndpointRecord(result.Records[i])
+		result.Endpoints[i] = redactEndpointRecord(result.Endpoints[i])
 	}
 	return result
 }

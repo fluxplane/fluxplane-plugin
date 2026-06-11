@@ -2,6 +2,42 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.13.0
+
+Field-report-3 fixes (fluxplane-plugins#6, fluxplane-plugins#7).
+
+### Changed
+- **Unknown input fields are rejected uniformly** (#6): the unknown-key check
+  now also runs for operations that declare schema examples — examples signal
+  one-of *required* shapes, but a typo'd field name is never valid under
+  `additionalProperties: false`. Previously example-decorated operations
+  (most gitlab ops) silently ignored unknown fields while others rejected
+  them.
+- **Endpoint store self-heals "listed but not stored" records** (#7): a
+  record stored under a stale state key (older ID normalization or an
+  external writer) now resolves by its own normalized ID and is rekeyed in
+  place; the invoke-time error gained remediation hints (`endpoint list` /
+  `endpoint save` / `endpoint import`).
+- **`endpoint list` returns one array** (#6): `endpoints` now carries the
+  full stored records (ref + `created_at`/`updated_at`/`last_health`); the
+  duplicate bare-ref array is gone.
+- **`list` uses the same `{"plugins": [...]}` envelope as `status`** (#6) —
+  jq written against one works on the other.
+- **`install` of an already-installed plugin is a no-op success** (#6):
+  exits 0 with `"already installed, nothing to do"` like a package manager;
+  `--force` still reinstalls, `update` upgrades.
+- **`operation search` emits JSON by default** (#6), matching every other
+  subcommand and the skill page's "Output is JSON" claim; `--plain` renders
+  the old human-readable lines.
+- **`lookup`/`lookup-all` separate setup noise from results** (#6):
+  unconfigured plugins are reported once as `skipped_unconfigured` names
+  instead of per-plugin errors, and per-plugin "index not built" hints are
+  muted when another plugin already matched.
+- **Skill pages embed their state source** (#6): the header shows the state
+  file path and installed-plugin count, so a page generated against a
+  divergent state dir ("fresh timestamp, stale plugin list") is
+  self-diagnosing.
+
 ## v0.12.0
 
 Field-report-2 fixes (fluxplane-plugins#5).

@@ -29,7 +29,9 @@ type operationDryRunResult struct {
 // It deliberately does NOT validate: nested required, types, oneOf/anyOf/allOf,
 // $ref, formats, or numeric bounds. When an operation declares a schema example
 // (a signal of one-of/conditional input a flat schema cannot express), the
-// missing-required and unknown-key checks are suppressed; only enum checks run.
+// missing-required check is suppressed. Unknown-key and enum checks always run:
+// one-of shapes change which fields are required, never which fields exist, so
+// a typo'd field name is flagged uniformly across plugins.
 func validateOperationInput(schema operationInputSchema, payload json.RawMessage) []validationProblem {
 	if len(strings.TrimSpace(string(payload))) == 0 {
 		return nil // no input given — let the backend decide if input is required
@@ -64,7 +66,7 @@ func validateOperationInput(schema operationInputSchema, payload json.RawMessage
 				Reason: fmt.Sprintf("value %s is not one of the allowed values: %s", jsonValue(value), enumList(field.Enum)),
 			})
 		}
-		if !exampleDriven && !known && schema.closedTopLevel() {
+		if !known && schema.closedTopLevel() {
 			problems = append(problems, validationProblem{Field: key, Reason: "unknown field (additionalProperties is false)"})
 		}
 	}

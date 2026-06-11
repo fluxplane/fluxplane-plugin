@@ -578,10 +578,11 @@ type EndpointListRequest struct {
 	Product string `json:"product,omitempty"`
 }
 
-// EndpointListResult contains stored endpoints.
+// EndpointListResult contains stored endpoints. One array: each entry is the
+// full stored record (ref plus created_at/updated_at/last_health) — no bare-ref
+// duplicate alongside it.
 type EndpointListResult struct {
-	Endpoints []fpendpoint.EndpointRef `json:"endpoints,omitempty"`
-	Records   []fpendpoint.Record      `json:"records,omitempty"`
+	Endpoints []fpendpoint.Record `json:"endpoints,omitempty"`
 }
 
 // EndpointGetRequest gets one stored endpoint.

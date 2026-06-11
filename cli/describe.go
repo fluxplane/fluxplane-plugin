@@ -195,7 +195,7 @@ func describePlugin(ctx context.Context, backend management.Backend, ref managem
 				result.Errors["endpoints"] = err.Error()
 				return
 			}
-			for _, record := range endpoints.Records {
+			for _, record := range endpoints.Endpoints {
 				result.Endpoints = append(result.Endpoints, describeEndpoint{ID: record.ID, URL: redactEndpointURL(record.URL), Product: record.Product})
 			}
 		},

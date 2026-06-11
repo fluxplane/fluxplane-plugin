@@ -56,7 +56,7 @@ func (b *describeFakeBackend) ListOperations(context.Context, management.Operati
 }
 
 func (b *describeFakeBackend) ListEndpoints(context.Context, management.EndpointListRequest) (management.EndpointListResult, error) {
-	return management.EndpointListResult{Records: []fpendpoint.Record{
+	return management.EndpointListResult{Endpoints: []fpendpoint.Record{
 		{EndpointRef: fpendpoint.EndpointRef{ID: "gitlab-prod", URL: "https://gitlab.example.com", Product: "gitlab"}},
 		{EndpointRef: fpendpoint.EndpointRef{ID: "homer-services", URL: "https://homer.example.com", Product: "homer"}},
 	}}, nil

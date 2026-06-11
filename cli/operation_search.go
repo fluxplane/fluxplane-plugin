@@ -34,7 +34,7 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 	var pluginFilter []string
 	var limit int
 	var readOnlyOnly bool
-	var asJSON bool
+	var plain bool
 	var full bool
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
@@ -42,7 +42,8 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 		Long: "Searches installed, enabled plugins for operations whose name or description match ANY " +
 			"of the whitespace-separated terms, ranked best-first (name hits and full term coverage " +
 			"rank higher; matched_terms shows partial matches). Use --plugin to restrict which " +
-			"plugins are queried, --read-only to list only read-only operations.",
+			"plugins are queried, --read-only to list only read-only operations. " +
+			"Output is JSON like every other subcommand; --plain renders human-readable lines.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := backendRequired(backend); err != nil {
@@ -105,17 +106,17 @@ func newOperationSearchCommand(backend management.Backend) *cobra.Command {
 			if len(result.Errors) == 0 {
 				result.Errors = nil
 			}
-			if asJSON {
-				return printJSON(cmd.OutOrStdout(), result)
+			if plain {
+				return renderOperationMatches(cmd, result)
 			}
-			return renderOperationMatches(cmd, result)
+			return printJSON(cmd.OutOrStdout(), result)
 		},
 	}
 	cmd.Flags().StringVar(&instance, "instance", defaultInstance(), "plugin instance")
 	cmd.Flags().StringArrayVar(&pluginFilter, "plugin", nil, "restrict the search to these plugins (repeatable)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "maximum matches to return")
 	cmd.Flags().BoolVar(&readOnlyOnly, "read-only", false, "only list read-only operations")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit matches as JSON")
+	cmd.Flags().BoolVar(&plain, "plain", false, "render human-readable lines instead of JSON")
 	cmd.Flags().BoolVar(&full, "full", false, "include each match's input fields and a runnable example (invoke without a separate describe)")
 	return cmd
 }

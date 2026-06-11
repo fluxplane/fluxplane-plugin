@@ -44,6 +44,13 @@ type Backend struct {
 	cacheMu sync.Mutex
 }
 
+// StatePath reports the JSON state file this backend reads and writes. Skill
+// pages embed it so a page generated against a divergent state dir is
+// self-diagnosing.
+func (b *Backend) StatePath() string {
+	return b.path
+}
+
 // Option configures a local backend.
 type Option func(*Backend)
 
@@ -326,7 +333,14 @@ func (b *Backend) InstallPlugin(ctx context.Context, req management.InstallReque
 	key := storedRef.Key()
 	existing, exists := st.Plugins[key]
 	if exists && !req.Force && !req.DryRun {
-		return management.InstallResult{}, fmt.Errorf("fluxplane-plugin: plugin %q is already installed", key)
+		// Idempotent like a package manager: re-installing an installed plugin
+		// is a no-op success (agents following stale docs hit this constantly).
+		// --force still reinstalls; `update` upgrades.
+		return management.InstallResult{
+			Plugin:    existing.Plugin,
+			Installed: true,
+			Message:   fmt.Sprintf("plugin %q is already installed, nothing to do (use --force to reinstall or `update` to upgrade)", key),
+		}, nil
 	}
 	now := time.Now().UTC()
 	labels := mergeLabels(nil, req.Labels)
@@ -1583,16 +1597,13 @@ func (b *Backend) ListEndpoints(_ context.Context, req management.EndpointListRe
 		return management.EndpointListResult{}, err
 	}
 	product := strings.TrimSpace(req.Product)
-	endpoints := make([]fpendpoint.EndpointRef, 0, len(st.Endpoints))
 	records := make([]fpendpoint.Record, 0, len(st.Endpoints))
 	for _, stored := range st.Endpoints {
 		record := stored.Endpoint
 		record.EndpointRef = record.EndpointRef.Normalize()
-		endpoint := record.EndpointRef
-		if product != "" && endpoint.Product != product {
+		if product != "" && record.Product != product {
 			continue
 		}
-		endpoints = append(endpoints, endpoint)
 		records = append(records, record)
 	}
 	sort.SliceStable(records, func(i, j int) bool {
@@ -1601,13 +1612,7 @@ func (b *Backend) ListEndpoints(_ context.Context, req management.EndpointListRe
 		}
 		return records[i].Product < records[j].Product
 	})
-	sort.SliceStable(endpoints, func(i, j int) bool {
-		if endpoints[i].Product == endpoints[j].Product {
-			return endpoints[i].ID < endpoints[j].ID
-		}
-		return endpoints[i].Product < endpoints[j].Product
-	})
-	return management.EndpointListResult{Endpoints: endpoints, Records: records}, nil
+	return management.EndpointListResult{Endpoints: records}, nil
 }
 
 // GetEndpoint returns one locally stored endpoint ref by id or @endpoint ref.
@@ -1622,6 +1627,25 @@ func (b *Backend) GetEndpoint(_ context.Context, req management.EndpointGetReque
 	}
 	stored, ok := st.Endpoints[id]
 	if !ok {
+		// Self-heal records stored under a stale map key (older ID normalization
+		// or an external writer): `endpoint list` renders map values, so such a
+		// record looks present while the keyed lookup misses — the classic
+		// "listed but not stored" desync. Match by the record's own normalized
+		// ID and rekey it so the next lookup hits directly.
+		for key, candidate := range st.Endpoints {
+			record := candidate.Endpoint
+			record.EndpointRef = record.EndpointRef.Normalize()
+			if record.EndpointRef.ID != id {
+				continue
+			}
+			delete(st.Endpoints, key)
+			candidate.Endpoint = record
+			st.Endpoints[id] = candidate
+			if err := b.writeState(st); err != nil {
+				return management.EndpointGetResult{}, err
+			}
+			return management.EndpointGetResult{Endpoint: record.EndpointRef, Record: record, Found: true}, nil
+		}
 		return management.EndpointGetResult{Found: false}, nil
 	}
 	record := stored.Endpoint
@@ -2442,7 +2466,7 @@ func (h cliHost) endpointRef(ref string) (fpendpoint.EndpointRef, error) {
 		return fpendpoint.EndpointRef{}, err
 	}
 	if !got.Found {
-		return fpendpoint.EndpointRef{}, fmt.Errorf("endpoint %q is not stored", id)
+		return fpendpoint.EndpointRef{}, fmt.Errorf("endpoint %q is not stored — check `fluxplane-plugin endpoint list` for the exact id, or register it with `endpoint save`/`endpoint import`", id)
 	}
 	return got.Endpoint.Normalize(), nil
 }

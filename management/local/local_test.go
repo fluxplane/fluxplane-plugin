@@ -843,11 +843,8 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEndpoints: %v", err)
 	}
-	if !hasEndpoint(listedEndpoints.Endpoints, "test-endpoint") {
-		t.Fatalf("listed endpoints = %#v", listedEndpoints)
-	}
-	if !hasEndpointRecord(listedEndpoints.Records, "test-endpoint") {
-		t.Fatalf("listed endpoint records = %#v", listedEndpoints.Records)
+	if !hasEndpointRecord(listedEndpoints.Endpoints, "test-endpoint") {
+		t.Fatalf("listed endpoints = %#v", listedEndpoints.Endpoints)
 	}
 	got, err := backend.GetEndpoint(context.Background(), management.EndpointGetRequest{ID: "@endpoint/test-endpoint"})
 	if err != nil {
@@ -897,7 +894,7 @@ func TestBackendInvokesConfiguredPluginRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEndpoints after remove: %v", err)
 	}
-	if hasEndpoint(empty.Endpoints, "test-endpoint") {
+	if hasEndpointRecord(empty.Endpoints, "test-endpoint") {
 		t.Fatalf("endpoints after remove = %#v", empty)
 	}
 }
@@ -921,15 +918,6 @@ func testRuntimeSpec() management.RuntimeSpec {
 func hasOperation(operations []sdkmanifest.OperationSpec, name string) bool {
 	for _, operation := range operations {
 		if operation.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasEndpoint(endpoints []fpendpoint.EndpointRef, id string) bool {
-	for _, endpoint := range endpoints {
-		if endpoint.ID == id {
 			return true
 		}
 	}
@@ -1517,5 +1505,98 @@ func TestBlobWritePreservesFilenameInPath(t *testing.T) {
 	}
 	if !strings.HasSuffix(blob.Path, ".bin") {
 		t.Fatalf("explicit-ref path = %q, want .bin", blob.Path)
+	}
+}
+
+func TestInstallAlreadyInstalledIsIdempotent(t *testing.T) {
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	req := management.InstallRequest{
+		Ref:      management.Ref{Name: "gitlab"},
+		Source:   "test",
+		Runtime:  management.RuntimeSpec{Kind: "stdio", Command: "gitlab"},
+		Manifest: []byte(`{"name":"gitlab"}`),
+	}
+	if _, err := backend.InstallPlugin(ctx, req); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+	// Second install of the same plugin is a no-op success, not an error.
+	again, err := backend.InstallPlugin(ctx, req)
+	if err != nil {
+		t.Fatalf("re-install must not error: %v", err)
+	}
+	if !again.Installed || again.Updated || !strings.Contains(again.Message, "already installed") {
+		t.Fatalf("re-install = %#v, want no-op success", again)
+	}
+	// --force still reinstalls (no message, normal path).
+	forcedReq := req
+	forcedReq.Force = true
+	forced, err := backend.InstallPlugin(ctx, forcedReq)
+	if err != nil {
+		t.Fatalf("forced re-install: %v", err)
+	}
+	if !forced.Updated || strings.Contains(forced.Message, "already installed") {
+		t.Fatalf("forced re-install = %#v, want real reinstall", forced)
+	}
+}
+
+func TestGetEndpointSelfHealsStaleStateKey(t *testing.T) {
+	path := t.TempDir() + "/plugins.json"
+	backend, err := New(WithPath(path))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := backend.SaveEndpoint(ctx, management.EndpointSaveRequest{Endpoint: fpendpoint.EndpointRef{
+		ID: "loki-local", Product: "loki", Protocol: "http", Source: "manual", URL: "http://127.0.0.1:3100",
+	}}); err != nil {
+		t.Fatalf("SaveEndpoint: %v", err)
+	}
+	// Simulate the field-report desync: the record sits under a stale map key
+	// (older normalization / external writer) while its own ID is correct.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	var endpoints map[string]json.RawMessage
+	if err := json.Unmarshal(state["endpoints"], &endpoints); err != nil {
+		t.Fatalf("decode endpoints: %v", err)
+	}
+	endpoints["legacy-key/loki-local"] = endpoints["loki-local"]
+	delete(endpoints, "loki-local")
+	state["endpoints"], _ = json.Marshal(endpoints)
+	rewritten, _ := json.Marshal(state)
+	if err := os.WriteFile(path, rewritten, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	// The record lists fine (list renders values)...
+	listed, err := backend.ListEndpoints(ctx, management.EndpointListRequest{})
+	if err != nil {
+		t.Fatalf("ListEndpoints: %v", err)
+	}
+	if !hasEndpointRecord(listed.Endpoints, "loki-local") {
+		t.Fatalf("listed = %#v", listed.Endpoints)
+	}
+	// ...and GetEndpoint now finds it anyway and rekeys it in place.
+	got, err := backend.GetEndpoint(ctx, management.EndpointGetRequest{ID: "@endpoint/loki-local"})
+	if err != nil {
+		t.Fatalf("GetEndpoint: %v", err)
+	}
+	if !got.Found || got.Endpoint.ID != "loki-local" || got.Endpoint.URL != "http://127.0.0.1:3100" {
+		t.Fatalf("got = %#v, want self-healed hit", got)
+	}
+	healed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read healed state: %v", err)
+	}
+	if strings.Contains(string(healed), "legacy-key/loki-local") {
+		t.Fatalf("stale key survived self-heal: %s", healed)
 	}
 }

@@ -204,10 +204,10 @@ func (f *fakeBackend) DiscoverEndpoints(_ context.Context, req management.Endpoi
 
 func (f *fakeBackend) ListEndpoints(_ context.Context, req management.EndpointListRequest) (management.EndpointListResult, error) {
 	f.endpointListed = req
-	if len(f.endpointList.Records) > 0 || len(f.endpointList.Endpoints) > 0 {
+	if len(f.endpointList.Endpoints) > 0 {
 		return f.endpointList, nil
 	}
-	return management.EndpointListResult{Endpoints: []fpendpoint.EndpointRef{{ID: "gitlab", URL: "https://gitlab.example.com", Product: "gitlab"}}}, nil
+	return management.EndpointListResult{Endpoints: []fpendpoint.Record{{EndpointRef: fpendpoint.EndpointRef{ID: "gitlab", URL: "https://gitlab.example.com", Product: "gitlab"}}}}, nil
 }
 
 func (f *fakeBackend) GetEndpoint(_ context.Context, req management.EndpointGetRequest) (management.EndpointGetResult, error) {
@@ -693,7 +693,7 @@ func TestEndpointDoctorCommandTestsTCPAndStoresHealth(t *testing.T) {
 
 	backend := &fakeBackend{
 		endpointList: management.EndpointListResult{
-			Records: []fpendpoint.Record{{
+			Endpoints: []fpendpoint.Record{{
 				EndpointRef: fpendpoint.EndpointRef{
 					ID:       "local-tcp",
 					URL:      "tcp://" + listener.Addr().String(),
@@ -813,8 +813,7 @@ type endpointListFakeBackend struct {
 func (b *endpointListFakeBackend) ListEndpoints(context.Context, management.EndpointListRequest) (management.EndpointListResult, error) {
 	ref := fpendpoint.EndpointRef{ID: "aurora", URL: "mysql://user:s3cr3t@db.example.com:3306/app", Product: "mysql"}
 	return management.EndpointListResult{
-		Endpoints: []fpendpoint.EndpointRef{ref},
-		Records:   []fpendpoint.Record{{EndpointRef: ref}},
+		Endpoints: []fpendpoint.Record{{EndpointRef: ref}},
 	}, nil
 }
 
@@ -907,21 +906,101 @@ func TestLookupFanoutSkipsUnconfiguredPlugins(t *testing.T) {
 			Reason  string         `json:"reason"`
 			Error   string         `json:"error"`
 		} `json:"results"`
+		SkippedUnconfigured []string `json:"skipped_unconfigured"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 		t.Fatalf("decode: %v\n%s", err, out.String())
 	}
+	// Unconfigured plugins leave the result list entirely — names only.
 	byName := map[string]int{}
 	for i, r := range result.Results {
 		byName[r.Plugin.Name] = i
 	}
-	unconfigured := result.Results[byName["ollama"]]
-	if !unconfigured.Skipped || unconfigured.Error != "" || !strings.Contains(unconfigured.Reason, "endpoint_ref is required") {
-		t.Fatalf("unconfigured plugin = %#v, want skipped with reason", unconfigured)
+	if _, present := byName["ollama"]; present {
+		t.Fatalf("unconfigured plugin must not appear in results: %s", out.String())
+	}
+	if len(result.SkippedUnconfigured) != 1 || result.SkippedUnconfigured[0] != "ollama" {
+		t.Fatalf("skipped_unconfigured = %#v, want [ollama]", result.SkippedUnconfigured)
 	}
 	broken := result.Results[byName["slack"]]
 	if broken.Skipped || !strings.Contains(broken.Error, "boom") {
 		t.Fatalf("real failure must stay an error: %#v", broken)
+	}
+}
+
+func TestListCommandUsesPluginsEnvelope(t *testing.T) {
+	var out bytes.Buffer
+	cmd := New(Options{Backend: &fakeBackend{}, Out: &out})
+	cmd.SetArgs([]string{"list"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// Same envelope as `status`: {"plugins": [...]} — jq written against one
+	// works on the other.
+	var result struct {
+		Plugins []management.Plugin `json:"plugins"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	if len(result.Plugins) == 0 {
+		t.Fatalf("plugins envelope empty: %s", out.String())
+	}
+}
+
+func TestLookupMutesIndexHintsWhenAnyPluginMatched(t *testing.T) {
+	backend := &lookupHintFakeBackend{fakeBackend: &fakeBackend{}}
+	var out bytes.Buffer
+	cmd := New(Options{Backend: backend, Out: &out})
+	cmd.SetArgs([]string{"lookup", "PROJ-123"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var result struct {
+		Results []struct {
+			Plugin management.Ref `json:"plugin"`
+			Hint   string         `json:"hint"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out.String())
+	}
+	// gitlab matched, so jira's "index not built" hint is noise — muted.
+	for _, r := range result.Results {
+		if r.Hint != "" {
+			t.Fatalf("hint should be muted when another plugin matched: %#v", result.Results)
+		}
+	}
+}
+
+type lookupHintFakeBackend struct {
+	*fakeBackend
+}
+
+func (b *lookupHintFakeBackend) ListPlugins(context.Context, management.ListRequest) ([]management.Plugin, error) {
+	return []management.Plugin{
+		{Ref: management.Ref{Name: "gitlab"}, Installed: true, Enabled: true},
+		{Ref: management.Ref{Name: "jira"}, Installed: true, Enabled: true},
+	}, nil
+}
+
+func (b *lookupHintFakeBackend) ListDatasources(_ context.Context, req management.DatasourceListRequest) (management.DatasourceListResult, error) {
+	return management.DatasourceListResult{Datasources: []sdkmanifest.DatasourceSpec{{
+		Name:         req.Ref.Name + ".items",
+		Entity:       req.Ref.Name + ".item",
+		Capabilities: []string{"lookup"},
+	}}}, nil
+}
+
+func (b *lookupHintFakeBackend) CallDatasource(_ context.Context, req management.DatasourceCallRequest) (management.DatasourceCallResult, error) {
+	switch req.Ref.Name {
+	case "gitlab":
+		return management.DatasourceCallResult{Result: json.RawMessage(`{"count":1,"matches":[{"id":"x"}]}`)}, nil
+	default:
+		return management.DatasourceCallResult{
+			Result: json.RawMessage(`{"count":0}`),
+			Hint:   "index not built — run: fluxplane-plugin index build jira",
+		}, nil
 	}
 }
 
