@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1730,5 +1732,69 @@ func TestGoModuleEnvAddsOrgToPrivate(t *testing.T) {
 	}
 	if !strings.Contains(joined, "GO111MODULE=on") || !strings.Contains(joined, "GOWORK=off") {
 		t.Fatalf("module mode env missing: %s", joined)
+	}
+}
+
+func TestHTTPAutoRevivesDeadLoopbackForward(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("respawn helper uses /usr/bin/env")
+	}
+	backend, err := New(WithPath(t.TempDir() + "/plugins.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Pick a free port, then leave it closed: the first dial must be refused.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+
+	// A dead kubernetes.portforward record for that port whose respawn command
+	// starts a real HTTP listener on it.
+	script := filepath.Join(t.TempDir(), "fake-forward.sh")
+	mustWrite(t, script, "#!/bin/sh\nexec python3 -m http.server "+strconv.Itoa(port)+" --bind 127.0.0.1\n")
+	if err := os.Chmod(script, 0o700); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	st, _ := backend.readState()
+	if st.Processes == nil {
+		st.Processes = map[string]storedProcess{}
+	}
+	st.Processes["kpf-test"] = storedProcess{
+		ID: "kpf-test", Command: script, Group: "kubernetes.portforward",
+		PID:      999999, // long dead
+		Metadata: map[string]string{"local_port": strconv.Itoa(port)},
+	}
+	if err := backend.writeState(st); err != nil {
+		t.Fatalf("writeState: %v", err)
+	}
+
+	origWait := forwardReviveWait
+	forwardReviveWait = 1200 * time.Millisecond
+	t.Cleanup(func() {
+		forwardReviveWait = origWait
+		_, _ = (cliHost{backend: backend}).stopStoredProcess(sdkhost.ProcessStopRequest{ID: "kpf-test", Signal: "SIGKILL"})
+	})
+
+	host := cliHost{backend: backend, plugin: "loki", instance: "default"}
+	raw, err := host.httpDo(sdkhost.HTTPRequest{
+		URL: "http://127.0.0.1:" + strconv.Itoa(port), Path: "/", Method: "GET", TimeoutMS: 5000,
+	})
+	if err != nil {
+		t.Fatalf("httpDo after revive: %v", err)
+	}
+	var resp sdkhost.HTTPResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 from the revived forward", resp.StatusCode)
+	}
+	// The respawned process is recorded with a fresh PID.
+	st, _ = backend.readState()
+	if record := st.Processes["kpf-test"]; record.PID == 999999 || !processAlive(record.PID) {
+		t.Fatalf("record = %#v, want respawned live process", record)
 	}
 }

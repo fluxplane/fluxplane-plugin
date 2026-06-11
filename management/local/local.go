@@ -2398,6 +2398,13 @@ func (h cliHost) httpDo(payload any) (json.RawMessage, error) {
 	}
 	start := time.Now()
 	resp, err := client.Do(httpReq)
+	if err != nil && h.reviveLoopbackForward(urlString, err) {
+		// The forward is back up — retry the request once with a fresh body.
+		if retry, retryErr := http.NewRequest(method, urlString, bytes.NewReader(req.Body)); retryErr == nil {
+			retry.Header = httpReq.Header.Clone()
+			resp, err = client.Do(retry)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2426,6 +2433,60 @@ func (h cliHost) httpDo(payload any) (json.RawMessage, error) {
 		Truncated:   truncated,
 		DurationMS:  time.Since(start).Milliseconds(),
 	})
+}
+
+// reviveLoopbackForward restarts a dead managed port-forward whose local port
+// matches a refused loopback dial, so TTL-expired forwards self-heal on next
+// use instead of failing the operation. Conservative: only loopback hosts,
+// only `kubernetes.portforward`-group records, only when the recorded process
+// is actually dead, and at most one revive per request. Overridable wait for
+// tests.
+var forwardReviveWait = 1500 * time.Millisecond
+
+func (h cliHost) reviveLoopbackForward(rawURL string, dialErr error) bool {
+	if h.backend == nil || dialErr == nil || !strings.Contains(dialErr.Error(), "connection refused") {
+		return false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	port := parsed.Port()
+	if port == "" {
+		return false
+	}
+	st, err := h.backend.readState()
+	if err != nil {
+		return false
+	}
+	for _, record := range st.Processes {
+		if record.Group != "kubernetes.portforward" || record.Metadata["local_port"] != port {
+			continue
+		}
+		if processAlive(record.PID) {
+			return false // tunnel process is up; the refusal has another cause
+		}
+		if _, err := h.processStart(sdkhost.ProcessStartRequest{
+			ID:       record.ID,
+			Command:  record.Command,
+			Args:     append([]string(nil), record.Args...),
+			Workdir:  record.Workdir,
+			Label:    record.Label,
+			Group:    record.Group,
+			Tags:     append([]string(nil), record.Tags...),
+			Metadata: cloneStringMap(record.Metadata),
+			LogPath:  record.LogPath,
+		}); err != nil {
+			return false
+		}
+		time.Sleep(forwardReviveWait) // let the tunnel establish
+		return true
+	}
+	return false
 }
 
 func (h cliHost) httpURL(req sdkhost.HTTPRequest) (string, error) {

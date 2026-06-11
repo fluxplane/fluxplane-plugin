@@ -2,6 +2,30 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.16.0
+
+Incident-troubleshooter stack (with fluxplane-plugins alertmanager/v0.1.0,
+prometheus/v0.3.0, kubernetes/v0.7.0).
+
+### Added
+- **`monitor connect --context <ctx>`** — one command wires a cluster's
+  monitoring stack: discovers prometheus/alertmanager/loki/grafana services
+  via the kubernetes plugin, port-forwards each (reusing live forwards for
+  the same target), and registers `<product>-<cluster-alias>` endpoints
+  annotated with the forward target. Per-product skip/error reporting.
+- **Port-forward auto-revive** — when a dial to a loopback endpoint is
+  refused and the managed `kubernetes.portforward` process for that local
+  port is dead, the host respawns it from the stored spec and retries the
+  request once. TTL-expired forwards self-heal at next use instead of
+  failing the operation (loki/prometheus/alertmanager/grafana all benefit).
+- **`incident timeline --context <ctx> --namespace <ns> [--since 2h]
+  [--project g/a]`** — the "what changed?" command: kubernetes rollouts and
+  warnings (routine pod/cron churn filtered), alertmanager alerts that
+  started in the window (older firing alerts summarized as
+  `preexisting_alerts`), loki error-rate buckets, and gitlab deployments —
+  merged into one chronological view. Unconfigured sources are skipped and
+  listed, never fatal. JSON default, `--plain` text.
+
 ## v0.15.0
 
 Dogfood-friction fixes (fluxplane-plugins#9, #10, #11).

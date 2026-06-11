@@ -85,6 +85,8 @@ func New(opts Options) *cobra.Command {
 		newRollbackCommand(opts.Backend),
 		newProcessCommand(opts.Backend),
 		newBlobCommand(opts.Backend),
+		newMonitorCommand(opts.Backend),
+		newIncidentCommand(opts.Backend),
 		newDescribeCommand(opts.Backend),
 		newVersionCommand(),
 	)
