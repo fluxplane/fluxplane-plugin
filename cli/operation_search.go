@@ -7,9 +7,21 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/fluxplane/fluxplane-plugin/internal/nameguess"
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 )
+
+// termSynonymInName reports whether a verb synonym of term appears in the
+// operation name, bridging get/show/fetch-style vocabulary differences.
+func termSynonymInName(term, lowerName string) bool {
+	for _, syn := range nameguess.Synonyms(term) {
+		if strings.Contains(lowerName, syn) {
+			return true
+		}
+	}
+	return false
+}
 
 type operationMatch struct {
 	Plugin       string                  `json:"plugin"`
@@ -147,6 +159,12 @@ func rankOperationMatches(query, plugin string, ops []sdkmanifest.OperationSpec,
 			case strings.Contains(lowerName, term):
 				matched++
 				score += 15
+			case termSynonymInName(term, lowerName):
+				// Verb synonyms bridge per-plugin vocabulary ("page get" finds
+				// page.show) at a discount below literal name hits but above
+				// description hits.
+				matched++
+				score += 10
 			case strings.Contains(lowerDesc, term):
 				matched++
 				score += 5

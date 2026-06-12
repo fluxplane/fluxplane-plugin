@@ -45,6 +45,23 @@ func TestRankOperationMatches(t *testing.T) {
 	}
 }
 
+func TestRankOperationMatchesBridgesVerbSynonyms(t *testing.T) {
+	ops := []sdkmanifest.OperationSpec{
+		{Name: "confluence.page.show", Description: "Render one page."},
+		{Name: "confluence.page.children", Description: "Direct child pages."},
+	}
+	// "get" matches page.show via the verb-synonym bridge, and the operation
+	// covering both terms ranks first.
+	matches := rankOperationMatches("page get", "confluence", ops, false, false)
+	if len(matches) == 0 {
+		t.Fatalf("expected synonym-bridged match, got none")
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	if matches[0].Operation != "confluence.page.show" || matches[0].MatchedTerms != 2 {
+		t.Fatalf("synonym ranking = %#v", matches)
+	}
+}
+
 func TestRankOperationMatchesFull(t *testing.T) {
 	ops := []sdkmanifest.OperationSpec{{
 		Name:        "jira.issue.comment.add",

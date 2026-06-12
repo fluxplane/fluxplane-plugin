@@ -2,6 +2,35 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.18.0
+
+### Added
+- **Did-you-mean suggestions end the input-guessing loop**
+  (fluxplane-plugins#12 frictions #1/#3). An unknown input field now names
+  its most likely intended sibling (`unknown field …; did you mean "key"?`)
+  or, when nothing is close, lists the operation's valid fields outright.
+  An operation name the plugin doesn't advertise fails fast *before* the
+  backend round-trip with up to three close matches (`--no-validate` still
+  invokes anyway; an empty or unavailable operation listing never blocks a
+  call). The plugin-side dispatcher (`pluginbinding`) adds the same
+  suggestion to its `unknown_operation` error, so non-CLI protocol
+  consumers get it too once plugins rebuild against this SDK.
+- `operation search` bridges verb synonyms (get/show/fetch, list/ls,
+  delete/remove, update/edit, search/find) at a ranking discount — "page
+  get" now finds `confluence.page.show` without knowing the plugin's verb.
+
+### Changed
+- **One failure envelope for every `operation invoke` error**
+  (fluxplane-plugins#12 friction #3): local validation, plugin, and
+  transport failures all print
+  `{"plugin", "operation", "error": {code, message, fields, details}}`, so
+  `.error.code` is always at the same path. Under `--result-only` the
+  envelope goes to **stdout** (instead of stderr) and the exit code stays
+  non-zero — `--result-only … | parse` pipelines fail loudly with parseable
+  JSON instead of crashing on empty stdin.
+- `auth connect`/`test`/`disconnect` results always carry `connected`
+  (previously omitted when false, hiding the outcome of a failed probe).
+
 ## v0.17.0
 
 ### Added

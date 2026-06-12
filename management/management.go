@@ -349,7 +349,7 @@ type AuthResult struct {
 	Plugin    Ref       `json:"plugin"`
 	Instance  string    `json:"instance"`
 	Auth      AuthState `json:"auth,omitempty"`
-	Connected bool      `json:"connected,omitempty"`
+	Connected bool      `json:"connected"`
 	Changed   bool      `json:"changed"`
 	Message   string    `json:"message,omitempty"`
 }

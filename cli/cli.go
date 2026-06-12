@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	fpendpoint "github.com/fluxplane/fluxplane-endpoint"
+	"github.com/fluxplane/fluxplane-plugin/internal/nameguess"
 	"github.com/fluxplane/fluxplane-plugin/management"
 	sdkmanifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
@@ -938,10 +939,11 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 			// Discovery failures are non-fatal for a real invoke (never block a
 			// valid call), but surfaced under --dry-run.
 			var schema operationInputSchema
+			var opNames []string
 			var schemaFound bool
 			var schemaErr error
 			if !noValidate || len(argVals) > 0 {
-				schema, schemaFound, schemaErr = operationSchema(cmd.Context(), backend, ref, instance, opName)
+				schema, opNames, schemaFound, schemaErr = operationSchema(cmd.Context(), backend, ref, instance, opName)
 			}
 			var schemaPtr *operationInputSchema
 			if schemaFound {
@@ -956,6 +958,18 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 				if schemaErr != nil && dryRun {
 					return schemaErr
 				}
+				if schemaErr == nil && !schemaFound && len(opNames) > 0 {
+					// The plugin advertises operations and this isn't one of
+					// them, so a backend round-trip can only fail. Fail fast and
+					// name the closest advertised operations instead of leaving
+					// the agent to guess. (An empty or unavailable listing still
+					// proceeds: degraded discovery must never block a valid call.)
+					perr := protocol.Error{Code: "unknown_operation", Message: fmt.Sprintf("plugin %s does not advertise operation %q (--no-validate to invoke anyway)", ref.Name, opName)}
+					if matches := nameguess.CloseMatches(opName, opNames, 3); len(matches) > 0 {
+						perr.Details = []string{"close matches: " + strings.Join(matches, ", ")}
+					}
+					return reportInvokeFailure(cmd, ref.Name, opName, perr, resultOnly)
+				}
 				if schemaFound {
 					problems := validateOperationInput(schema, payload)
 					if dryRun {
@@ -964,10 +978,11 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 						})
 					}
 					if len(problems) > 0 {
-						_ = printJSON(cmd.ErrOrStderr(), protocol.Error{Code: "invalid_input", Message: "input failed local validation", Fields: problemFields(problems)})
-						return ErrReported
+						return reportInvokeFailure(cmd, ref.Name, opName, protocol.Error{Code: "invalid_input", Message: "input failed local validation", Fields: problemFields(problems)}, resultOnly)
 					}
 				} else if dryRun {
+					// No schema to validate against (empty listing): report and
+					// stop — dry-run must NEVER reach the backend.
 					return printJSON(cmd.OutOrStdout(), operationDryRunResult{Plugin: ref.Name, Operation: opName, Valid: true, Input: redactInputForDisplay(payload)})
 				}
 			} else if dryRun {
@@ -976,14 +991,21 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 
 			result, err := backend.InvokeOperation(cmd.Context(), management.OperationInvokeRequest{Ref: ref, Instance: instance, Operation: opName, Input: payload})
 			if err != nil {
-				// Surface the plugin's structured error so an agent can read
-				// code/fields/details from stderr JSON instead of a flat string.
+				// Every invoke failure leaves through the same envelope so a
+				// consumer always finds .error.code at one path, whether the
+				// failure was local validation, the plugin, or transport.
 				var opErr *management.OperationFailure
 				if errors.As(err, &opErr) {
-					_ = printJSON(cmd.ErrOrStderr(), opErr)
-					return ErrReported
+					plugin, operation := opErr.Plugin, opErr.Operation
+					if plugin == "" {
+						plugin = ref.Name
+					}
+					if operation == "" {
+						operation = opName
+					}
+					return reportInvokeFailure(cmd, plugin, operation, opErr.Err, resultOnly)
 				}
-				return err
+				return reportInvokeFailure(cmd, ref.Name, opName, protocol.Error{Code: "invoke_failed", Message: err.Error()}, resultOnly)
 			}
 			missing, err := printOperationResultStrict(cmd.OutOrStdout(), result, resultOnly, splitFieldPaths(fields))
 			if err != nil {
@@ -1000,8 +1022,8 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "operation input JSON file")
 	cmd.Flags().StringArrayVar(&argVals, "arg", nil, "set an input field as key=value; dotted keys nest (e.g. --arg fields.priority=High); values coerce to the operation schema's declared type (declared-string fields keep the raw text), else parse as JSON when valid")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate input locally and report; do not call the backend")
-	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation")
-	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope")
+	cmd.Flags().BoolVar(&noValidate, "no-validate", false, "skip local input validation and the unknown-operation fail-fast")
+	cmd.Flags().BoolVar(&resultOnly, "result-only", false, "print only the operation result, not the envelope; a failure prints the error envelope to stdout (instead of stderr) so pipelines fail loudly")
 	cmd.Flags().StringVar(&fields, "field", "", "comma-separated dot-paths to extract from the result; * maps over arrays (e.g. key,issue.fields.status.name,items.*.name)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit non-zero when a --field path is missing")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "abort the invocation after this duration (e.g. 30s); 0 uses the backend default")
@@ -1010,19 +1032,38 @@ func newOperationInvokeCommand(backend management.Backend) *cobra.Command {
 }
 
 // operationSchema resolves an operation's parsed input schema via the backend.
-// Returns (schema, found, err); found is false when the op isn't advertised.
-func operationSchema(ctx context.Context, backend management.Backend, ref management.Ref, instance, opName string) (operationInputSchema, bool, error) {
+// Returns (schema, advertised names, found, err); found is false when the op
+// isn't advertised — the name list then feeds the close-match suggestion.
+func operationSchema(ctx context.Context, backend management.Backend, ref management.Ref, instance, opName string) (operationInputSchema, []string, bool, error) {
 	list, err := backend.ListOperations(ctx, management.OperationListRequest{Ref: ref, Instance: instance})
 	if err != nil {
-		return operationInputSchema{}, false, err
+		return operationInputSchema{}, nil, false, err
 	}
 	name := strings.TrimSpace(opName)
+	names := make([]string, 0, len(list.Operations))
+	for _, op := range list.Operations {
+		names = append(names, strings.TrimSpace(op.Name))
+	}
 	for _, op := range list.Operations {
 		if strings.TrimSpace(op.Name) == name {
-			return parseOperationInputSchema(op), true, nil
+			return parseOperationInputSchema(op), names, true, nil
 		}
 	}
-	return operationInputSchema{}, false, nil
+	return operationInputSchema{}, names, false, nil
+}
+
+// reportInvokeFailure prints the unified invoke-failure envelope
+// ({plugin, operation, error:{code, message, fields, details}}) and returns
+// ErrReported. Failures normally land on stderr; with --result-only they land
+// on stdout instead, so `--result-only … | parse` pipelines read a structured
+// error rather than dying on empty input.
+func reportInvokeFailure(cmd *cobra.Command, plugin, operation string, perr protocol.Error, resultOnly bool) error {
+	out := cmd.ErrOrStderr()
+	if resultOnly {
+		out = cmd.OutOrStdout()
+	}
+	_ = printJSON(out, &management.OperationFailure{Plugin: plugin, Operation: operation, Err: perr})
+	return ErrReported
 }
 
 func problemFields(problems []validationProblem) map[string]string {

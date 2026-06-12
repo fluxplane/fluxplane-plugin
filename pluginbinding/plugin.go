@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	fpcontext "github.com/fluxplane/fluxplane-context"
+	"github.com/fluxplane/fluxplane-plugin/internal/nameguess"
 	manifest "github.com/fluxplane/fluxplane-plugin/manifest"
 	"github.com/fluxplane/fluxplane-plugin/protocol"
 	"github.com/invopop/jsonschema"
@@ -382,7 +383,15 @@ func (p *Plugin) runOperation(ctx stdcontext.Context, req protocol.Request, call
 	}
 	op := p.operations[call.Name]
 	if op == nil {
-		return OperationError(call, "unknown_operation", "unknown operation "+call.Name)
+		msg := "unknown operation " + call.Name
+		names := make([]string, 0, len(p.operations))
+		for name := range p.operations {
+			names = append(names, name)
+		}
+		if best := nameguess.Nearest(call.Name, names); best != "" {
+			msg += fmt.Sprintf("; did you mean %q?", best)
+		}
+		return OperationError(call, "unknown_operation", msg)
 	}
 	if host == nil {
 		host = newHostClient(nil)

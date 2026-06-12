@@ -2,6 +2,7 @@ package pluginbinding
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	manifest "github.com/fluxplane/fluxplane-plugin/manifest"
@@ -67,6 +68,17 @@ func TestPluginOperationBadInputReturnsProtocolError(t *testing.T) {
 	resp := plugin.Handle(request(t, protocol.CommandOperationsCall, operationCall(t, "test.hello", map[string]any{"name": 123})))
 	if resp.OK || resp.Error == nil || resp.Error.Code != "bad_input" {
 		t.Fatalf("response = %#v", resp)
+	}
+}
+
+func TestPluginUnknownOperationSuggestsNearestName(t *testing.T) {
+	plugin := newTestPlugin()
+	resp := plugin.Handle(request(t, protocol.CommandOperationsCall, operationCall(t, "test.helo", map[string]any{"name": "dex"})))
+	if resp.OK || resp.Error == nil || resp.Error.Code != "unknown_operation" {
+		t.Fatalf("response = %#v", resp)
+	}
+	if !strings.Contains(resp.Error.Message, `did you mean "test.hello"?`) {
+		t.Fatalf("message = %q, want did-you-mean suggestion", resp.Error.Message)
 	}
 }
 

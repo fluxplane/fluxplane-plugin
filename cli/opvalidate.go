@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/fluxplane/fluxplane-plugin/internal/nameguess"
 )
 
 type validationProblem struct {
@@ -67,7 +69,7 @@ func validateOperationInput(schema operationInputSchema, payload json.RawMessage
 			})
 		}
 		if !known && schema.closedTopLevel() {
-			problems = append(problems, validationProblem{Field: key, Reason: "unknown field (additionalProperties is false)"})
+			problems = append(problems, validationProblem{Field: key, Reason: unknownFieldReason(key, schema)})
 		}
 	}
 
@@ -78,6 +80,31 @@ func validateOperationInput(schema operationInputSchema, payload json.RawMessage
 		return problems[i].Reason < problems[j].Reason
 	})
 	return problems
+}
+
+// unknownFieldReason names the rejected field's most likely intended sibling,
+// or lists the valid vocabulary outright — either way the agent's next call
+// can be correct instead of another guess.
+func unknownFieldReason(key string, schema operationInputSchema) string {
+	const base = "unknown field (additionalProperties is false)"
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if best := nameguess.Nearest(key, names); best != "" {
+		return base + fmt.Sprintf("; did you mean %q?", best)
+	}
+	if len(names) > 0 {
+		const maxListed = 12
+		listed := names
+		suffix := ""
+		if len(listed) > maxListed {
+			listed, suffix = listed[:maxListed], ", …"
+		}
+		return base + "; valid fields: " + strings.Join(listed, ", ") + suffix
+	}
+	return base
 }
 
 func isScalar(v any) bool {
