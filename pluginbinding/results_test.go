@@ -18,6 +18,29 @@ func TestNewListResultIsComplete(t *testing.T) {
 	}
 }
 
+func TestListResultsAreNeverNull(t *testing.T) {
+	// A nil slice (no results) must still marshal to [] under the json:"items"
+	// (no omitempty) contract — never null, never a missing key.
+	var none []int
+	for name, raw := range map[string][]byte{
+		"NewListResult":      mustJSON(t, NewListResult(none)),
+		"NewPagedListResult": mustJSON(t, NewPagedListResult(none, 0, "")),
+	} {
+		if !strings.Contains(string(raw), `"items":[]`) {
+			t.Fatalf("%s on empty input must emit \"items\":[], got %s", name, raw)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
 func TestNewPagedListResultSignalsTruncation(t *testing.T) {
 	// Token present -> HasMore.
 	r := NewPagedListResult([]int{1, 2}, 0, "tok-2")

@@ -22,6 +22,7 @@ type ShowResult[T any] struct {
 
 // NewListResult builds a complete (non-truncated) list result.
 func NewListResult[T any](items []T) ListResult[T] {
+	items = neverNil(items)
 	return ListResult[T]{Items: items, Count: len(items)}
 }
 
@@ -29,10 +30,21 @@ func NewListResult[T any](items []T) ListResult[T] {
 // known total (0 if unknown) and a nextPageToken to fetch the following page
 // ("" if this is the last page). HasMore is derived from either signal.
 func NewPagedListResult[T any](items []T, total int, nextPageToken string) ListResult[T] {
+	items = neverNil(items)
 	token := strings.TrimSpace(nextPageToken)
 	result := ListResult[T]{Items: items, Count: len(items), Total: total, NextPageToken: token}
 	result.HasMore = token != "" || (total > 0 && len(items) < total)
 	return result
+}
+
+// neverNil coerces a nil slice to an empty one so Items always marshals to a
+// JSON `[]`, never `null` — the []-never-null contract callers rely on. The
+// Items json tag has no omitempty, but a nil slice would still encode as null.
+func neverNil[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 func NewShowResult[T any](record T, metadata map[string]any) ShowResult[T] {

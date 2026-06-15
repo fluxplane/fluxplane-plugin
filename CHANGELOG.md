@@ -2,6 +2,16 @@
 
 All notable changes to `fluxplane-plugin` are documented here.
 
+## v0.18.1
+
+### Fixed
+- **`ListResult` empty pages serialize as `[]`, never `null`.**
+  `NewListResult`/`NewPagedListResult` now coerce a nil `items` slice to an
+  empty one, honoring the `json:"items"` (no-omitempty) contract at runtime.
+  Previously any list operation returning zero rows emitted `"items": null`,
+  which the struct-tag convention checks could not catch. Every plugin's list
+  operations get the fix on rebuild against this SDK.
+
 ## v0.18.0
 
 ### Added
